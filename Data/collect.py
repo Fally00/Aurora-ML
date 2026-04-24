@@ -1,230 +1,259 @@
+"""
+Data/collect.py - SIT-Py Live System Metric Collector
+======================================================
+Captures real-time system metrics via psutil and returns a SystemSnapshot.
+
+Key changes from v1:
+  - Returns SystemSnapshot (schema-aligned dataclass) instead of raw dict
+  - No more dual CPUUsage / CPU_Usage keys - schema is now unified
+  - Writes live_metrics.csv using unified column names
+  - Task priority now derived from both nice values AND resource usage
+"""
+from __future__ import annotations
+
+import os
+import sys
+import platform
+import time
+from datetime import datetime
+from typing import Any, Optional, Tuple
+
 import psutil
 import pandas as pd
-import time
-import os
-import platform
-from datetime import datetime
-from typing import Any, Dict, Tuple, Optional
 
-# ── Config ────────────────────────────────────────────────────────────────────
-POLL_INTERVAL   = 2          # seconds between each snapshot
-OUTPUT_CSV      = os.path.join(os.path.dirname(__file__), "live_metrics.csv")
-MAX_ROWS        = 5000       # cap so CSV doesn't explode overnight
-IS_LINUX        = platform.system() == "Linux"
+# ── Path bootstrap (allow running as script or imported from parent) ────────
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+from Core.schema import SystemSnapshot
+from config import (
+    POLL_INTERVAL, LIVE_CSV, MAX_CSV_ROWS,
+    WORKLOAD_THRESHOLDS,
+)
 
-def get_temperature() -> float:
-    """
-    Returns average CPU temp in Celsius.
-    Only works on Linux with sensor support.
-    Returns -1.0 on Windows or unsupported systems.
-    """
+IS_LINUX = platform.system() == "Linux"
+
+
+# ── Hardware sensor helpers ─────────────────────────────────────────────────
+
+def _get_temperature() -> Optional[float]:
+    """Average CPU temperature in °C. None on Windows / unsupported systems."""
     if not IS_LINUX:
-        return -1.0
+        return None
     try:
-        temps_func = getattr(psutil, "sensors_temperatures", None)
-        if not temps_func:
-            return -1.0
-        temps = temps_func()
+        temps_fn = getattr(psutil, "sensors_temperatures", None)
+        if not temps_fn:
+            return None
+        temps = temps_fn()
         if not temps:
-            return -1.0
-        # grab first available sensor group (coretemp, k10temp, etc.)
-        for key, entries in temps.items():
-            if entries:
-                values = [getattr(e, "current", None) for e in entries]
-                values = [v for v in values if v is not None]
-                if values:
-                    return round(sum(values) / len(values), 2)
+            return None
+        for entries in temps.values():
+            vals = [getattr(e, "current", None) for e in entries]
+            vals = [v for v in vals if v is not None]
+            if vals:
+                return round(sum(vals) / len(vals), 2)
     except Exception:
-        return -1.0
-    return -1.0
+        return None
+    return None
 
 
-def get_fan_speed() -> int:
-    """
-    Returns first fan speed in RPM.
-    Linux only. Returns -1 on Windows.
-    """
+def _get_fan_speed() -> Optional[int]:
+    """First available fan speed in RPM. None on Windows / unsupported."""
     if not IS_LINUX:
-        return -1
+        return None
     try:
-        fans_func = getattr(psutil, "sensors_fans", None)
-        if not fans_func:
-            return -1
-        fans = fans_func()
+        fans_fn = getattr(psutil, "sensors_fans", None)
+        if not fans_fn:
+            return None
+        fans = fans_fn()
         if not fans:
-            return -1
+            return None
         for entries in fans.values():
             if entries:
-                first = entries[0]
-                val = getattr(first, "current", None)
-                return int(val) if val is not None else -1
+                val = getattr(entries[0], "current", None)
+                return int(val) if val is not None else None
     except Exception:
-        return -1
-    return -1
+        return None
+    return None
 
 
-def get_task_priority() -> str:
+# ── Derived metrics ─────────────────────────────────────────────────────────
+
+def _get_task_priority(cpu_pct: float, ram_pct: float) -> str:
     """
-    Derives workload priority from running process nice values.
-    Maps to: Low / Medium / High / Critical — mirrors dataset labels.
+    Derives workload priority from BOTH process nice values AND resource usage.
+    Falls back to resource thresholds if nice-value collection fails.
+    This gives a more accurate label for live training data.
     """
     try:
         nice_values = []
-        for proc in psutil.process_iter(['nice']):
+        for proc in psutil.process_iter(["nice"]):
             try:
-                n = proc.info['nice']
+                n = proc.info["nice"]
                 if n is not None:
                     nice_values.append(n)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
-        if not nice_values:
-            return "Medium"
-
-        avg_nice = sum(nice_values) / len(nice_values)
-
-        # lower nice = higher priority in Unix; Windows uses different scale
-        if avg_nice <= 0:
-            return "Critical"
-        elif avg_nice <= 5:
-            return "High"
-        elif avg_nice <= 15:
-            return "Medium"
-        else:
-            return "Low"
+        if nice_values:
+            avg_nice = sum(nice_values) / len(nice_values)
+            # Unix: lower nice = higher priority; Windows uses a different scale
+            if avg_nice <= 0:
+                return "Critical"
+            elif avg_nice <= 5:
+                return "High"
+            elif avg_nice <= 15:
+                return "Medium"
+            else:
+                return "Low"
     except Exception:
+        pass
+
+    # Fallback: resource-threshold labels
+    t = WORKLOAD_THRESHOLDS
+    if cpu_pct > t["Critical"]["cpu"] or ram_pct > t["Critical"]["ram"]:
+        return "Critical"
+    elif cpu_pct > t["High"]["cpu"] or ram_pct > t["High"]["ram"]:
+        return "High"
+    elif cpu_pct > t["Medium"]["cpu"] or ram_pct > t["Medium"]["ram"]:
         return "Medium"
+    return "Low"
 
 
-def get_bandwidth_and_packets(prev_net) -> Tuple[float, float]:
-    """
-    Returns (bandwidth_kbps, packet_rate_pps) since last poll.
-    Needs previous net_io snapshot to compute delta.
-    """
+def _get_bandwidth_and_packets(
+    prev_net, elapsed: float = POLL_INTERVAL
+) -> Tuple[float, float]:
+    """Returns (bandwidth_kbps, packet_rate_pps) since last poll."""
     curr_net = psutil.net_io_counters()
-
     if prev_net is None:
         return 0.0, 0.0
 
-    bytes_delta   = (curr_net.bytes_sent + curr_net.bytes_recv) - \
-                    (prev_net.bytes_sent + prev_net.bytes_recv)
-    packets_delta = (curr_net.packets_sent + curr_net.packets_recv) - \
-                    (prev_net.packets_sent + prev_net.packets_recv)
+    bytes_delta   = ((curr_net.bytes_sent   + curr_net.bytes_recv) -
+                     (prev_net.bytes_sent   + prev_net.bytes_recv))
+    packets_delta = ((curr_net.packets_sent + curr_net.packets_recv) -
+                     (prev_net.packets_sent + prev_net.packets_recv))
 
-    bandwidth_kbps  = round((bytes_delta * 8) / (POLL_INTERVAL * 1000), 2)  # kbps
-    packet_rate_pps = round(packets_delta / POLL_INTERVAL, 2)                # pps
-
+    t = max(elapsed, 0.001)   # guard against div/0
+    bandwidth_kbps  = round((bytes_delta * 8) / (t * 1000), 2)
+    packet_rate_pps = round(packets_delta / t, 2)
     return bandwidth_kbps, packet_rate_pps
 
 
-# ── Main Snapshot ─────────────────────────────────────────────────────────────
+# ── Main Snapshot ───────────────────────────────────────────────────────────
 
-def take_snapshot(prev_net) -> Tuple[Dict[str, Any], Any]:
+def take_snapshot(prev_net, elapsed: float = POLL_INTERVAL) -> Tuple[SystemSnapshot, Any]:
     """
     Captures a full system snapshot.
-    Returns dict of metrics + current net_io for next delta.
+
+    Args:
+        prev_net: previous psutil.net_io_counters() for delta calculation.
+        elapsed:  seconds since last snapshot (for accurate rate calculation).
+
+    Returns:
+        (SystemSnapshot, current net_io_counters for next call)
     """
-    cpu_usage    = psutil.cpu_percent(interval=None)
-    ram          = psutil.virtual_memory()
-    disk         = psutil.disk_usage('/')
-    bandwidth, packet_rate = get_bandwidth_and_packets(prev_net)
-    curr_net     = psutil.net_io_counters()
+    cpu_pct   = psutil.cpu_percent(interval=None)
+    ram       = psutil.virtual_memory()
+    disk      = psutil.disk_usage("/")
+    bw, pkts  = _get_bandwidth_and_packets(prev_net, elapsed)
+    curr_net  = psutil.net_io_counters()
 
-    snapshot = {
-        "timestamp"    : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-
-        # ── Motherboard dataset columns ──
-        "CPUUsage"     : cpu_usage,
-        "RAMUsage"     : ram.percent,
-        "Temperature"  : get_temperature(),
-        "DiskUsage"    : round(disk.percent, 2),
-        "FanSpeed"     : get_fan_speed(),
-
-        # ── Security dataset columns ──
-        "CPU_Usage"    : cpu_usage,
-        "Memory_Usage" : ram.percent,
-        "Bandwidth"    : bandwidth,
-        "Task_Priority": get_task_priority(),
-        "Packet_Rate"  : packet_rate,
-
-        # ── Extra context ──
-        "RAM_Available_MB"  : round(ram.available / (1024 ** 2), 2),
-        "Disk_Free_GB"      : round(disk.free / (1024 ** 3), 2),
-        "Process_Count"     : len(psutil.pids()),
-    }
-
-    return snapshot, curr_net
+    snap = SystemSnapshot(
+        timestamp        = datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        cpu_pct          = cpu_pct,
+        ram_pct          = ram.percent,
+        disk_pct         = round(disk.percent, 2),
+        bandwidth_kbps   = bw,
+        packet_rate_pps  = pkts,
+        temperature_c    = _get_temperature(),
+        fan_rpm          = _get_fan_speed(),
+        process_count    = len(psutil.pids()),
+        task_priority    = _get_task_priority(cpu_pct, ram.percent),
+        ram_available_mb = round(ram.available / (1024 ** 2), 2),
+        disk_free_gb     = round(disk.free / (1024 ** 3), 2),
+    )
+    return snap, curr_net
 
 
-# ── Poller Loop ───────────────────────────────────────────────────────────────
+# ── Collector Loop ───────────────────────────────────────────────────────────
 
 def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
     """
-    Main polling loop.
-    Runs forever if duration_seconds is None, else stops after N seconds.
-    Appends rows to OUTPUT_CSV.
+    Main polling loop. Writes to live_metrics.csv using unified schema columns.
+    Runs indefinitely if duration_seconds is None, else stops after N seconds.
     """
-    print(f"[SIT-Py Collector] Starting — polling every {POLL_INTERVAL}s")
-    print(f"[SIT-Py Collector] Output → {OUTPUT_CSV}")
-    print(f"[SIT-Py Collector] Platform: {platform.system()} | Sensors: {'ON' if IS_LINUX else 'OFF (Windows)'}")
+    print(f"[Collector] Starting - polling every {POLL_INTERVAL}s")
+    print(f"[Collector] Output  -> {LIVE_CSV}")
+    print(f"[Collector] Platform: {platform.system()} | Sensors: {'ON' if IS_LINUX else 'OFF'}")
     print("-" * 60)
 
-    rows         = []
-    prev_net     = psutil.net_io_counters()   # seed for delta calc
-    start_time   = time.time()
-    snapshot_num = 0
+    rows:      list  = []
+    prev_net         = psutil.net_io_counters()
+    start_time       = time.time()
+    last_poll        = start_time
+    snapshot_num: int = 0
 
     try:
         while True:
-            snapshot, prev_net = take_snapshot(prev_net)
-            rows.append(snapshot)
+            now     = time.time()
+            elapsed = now - last_poll
+            last_poll = now
+
+            snap, prev_net = take_snapshot(prev_net, elapsed)
+            rows.append(snap.to_live_csv_row())
             snapshot_num += 1
 
             if verbose:
-                print(f"[{snapshot['timestamp']}] "
-                      f"CPU: {snapshot['CPUUsage']}% | "
-                      f"RAM: {snapshot['RAMUsage']}% | "
-                      f"Disk: {snapshot['DiskUsage']}% | "
-                      f"BW: {snapshot['Bandwidth']} kbps | "
-                      f"Priority: {snapshot['Task_Priority']}")
+                print(
+                    f"[{snap.timestamp}]  "
+                    f"CPU: {snap.cpu_pct:5.1f}%  "
+                    f"RAM: {snap.ram_pct:5.1f}%  "
+                    f"Disk: {snap.disk_pct:5.1f}%  "
+                    f"BW: {snap.bandwidth_kbps:8.1f} kbps  "
+                    f"Priority: {snap.task_priority}"
+                )
 
-            # flush to CSV every 10 snapshots
+            # Flush every 10 rows
             if snapshot_num % 10 == 0:
                 _flush_to_csv(rows)
                 rows = []
-                print(f"  → flushed {snapshot_num} rows to CSV")
+                print(f"  -> flushed {snapshot_num} rows to {LIVE_CSV}")
 
-            # cap check
-            if snapshot_num >= MAX_ROWS:
-                print(f"[SIT-Py Collector] Hit MAX_ROWS ({MAX_ROWS}), stopping.")
+            if snapshot_num >= MAX_CSV_ROWS:
+                print(f"[Collector] Hit MAX_ROWS ({MAX_CSV_ROWS}), stopping.")
                 break
 
-            # duration check
-            if duration_seconds and (time.time() - start_time) >= duration_seconds:
-                print(f"[SIT-Py Collector] Duration reached ({duration_seconds}s), stopping.")
+            if duration_seconds and (now - start_time) >= duration_seconds:
+                print(f"[Collector] Duration reached ({duration_seconds}s), stopping.")
                 break
 
             time.sleep(POLL_INTERVAL)
 
     except KeyboardInterrupt:
-        print("\n[SIT-Py Collector] Stopped by user.")
-
+        print("\n[Collector] Stopped by user.")
     finally:
         if rows:
             _flush_to_csv(rows)
-        print(f"[SIT-Py Collector] Done. Total snapshots: {snapshot_num}")
+        print(f"[Collector] Done. Total snapshots: {snapshot_num}")
 
 
 def _flush_to_csv(rows: list):
-    """Appends rows to CSV, writes header only on first write."""
+    """Appends rows to LIVE_CSV; writes header only on first write."""
     df          = pd.DataFrame(rows)
-    file_exists = os.path.exists(OUTPUT_CSV)
-    df.to_csv(OUTPUT_CSV, mode='a', header=not file_exists, index=False)
+    file_exists = os.path.exists(LIVE_CSV)
+    df.to_csv(LIVE_CSV, mode="a", header=not file_exists, index=False)
 
 
-# ── Entry ─────────────────────────────────────────────────────────────────────
+# ── Entry ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    run_collector()
+    import argparse
+    parser = argparse.ArgumentParser(description="SIT-Py Live Metric Collector")
+    parser.add_argument("--duration", type=int, default=None,
+                        help="Stop after N seconds (default: run forever)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress per-snapshot output")
+    args = parser.parse_args()
+    run_collector(duration_seconds=args.duration, verbose=not args.quiet)
