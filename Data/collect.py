@@ -241,9 +241,30 @@ def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
 
 def _flush_to_csv(rows: list):
     """Appends rows to LIVE_CSV; writes header only on first write."""
-    df          = pd.DataFrame(rows)
-    file_exists = os.path.exists(LIVE_CSV)
-    df.to_csv(LIVE_CSV, mode="a", header=not file_exists, index=False)
+    df = pd.DataFrame(rows)
+    _ensure_csv_schema(LIVE_CSV, list(df.columns))
+    df.to_csv(LIVE_CSV, mode="a", header=not os.path.exists(LIVE_CSV), index=False)
+
+
+def _ensure_csv_schema(path: str, columns: list[str]) -> None:
+    """Rotate an older CSV aside if its header does not match the current schema."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            header = handle.readline().strip()
+    except OSError:
+        return
+
+    existing_cols = header.split(",") if header else []
+    if existing_cols == columns:
+        return
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = path.replace(".csv", f"_legacy_{stamp}.csv")
+    os.replace(path, backup_path)
+    print(f"[Collector] Existing CSV schema changed, moved old file to {backup_path}")
 
 
 # ── Entry ───────────────────────────────────────────────────────────────────

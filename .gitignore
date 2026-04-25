@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Runtime CSV outputs
+Data/live_metrics*.csv
+Data/sit_log*.csv
+Data/retrain_log.csv
+
+# Generated / local datasets
+Data/datasets/*.csv
+!Data/datasets/Laptop_Motherboard_Health_Monitoring_Dataset.csv

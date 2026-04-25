@@ -1,259 +1,280 @@
 """
-Core/anomaly.py - SIT-Py Anomaly Detector (v2)
-===============================================
-Dual-mode anomaly detection:
+Anomaly detector.
 
-  Mode A - Statistical Bridge (default at startup)
-    Uses z-score rolling statistics via FeatureEngineer.
-    Activates immediately, no training data required.
-    No more 100% false positive rate on idle Windows systems.
-
-  Mode B - Isolation Forest (activated after live data accumulation)
-    Trained on real live_metrics.csv data to learn THIS machine's normal profile.
-    Replaces Mode A once enough live data exists (RETRAIN_ROW_THRESHOLD rows).
-    Includes temporal features: deltas, rolling mean/std, bandwidth spike ratio.
-
-Key fixes from v1:
-  - No longer trained on Kaggle security simulation data
-  - No longer returns "Attack" for every idle system reading
-  - Temporal features allow detection of gradual drift (memory leaks, etc.)
-  - Label changed from "Attack/Normal" to "Alert/Normal" to reflect the
-    system-monitoring (not security) use case
+The anomaly model now trains against the dedicated anomaly dataset and keeps
+the same runtime output contract used by main.py and the dashboard.
 """
+
 from __future__ import annotations
 
 import os
 import sys
-import joblib
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import StandardScaler
-from typing import Optional, Dict
+from typing import Optional
 
-# ── Path bootstrap ─────────────────────────────────────────────────────────────
+import joblib
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import classification_report
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from Core.schema import SystemSnapshot, ANOMALY_FEATURE_COLS
+from Core.schema import (
+    ANOMALY_CATEGORICAL_COLS,
+    ANOMALY_FEATURE_COLS,
+    ANOMALY_NUMERIC_COLS,
+    ANOMALY_TARGET_COL,
+    coerce_numeric_columns,
+    ensure_columns,
+    normalize_anomaly_label,
+    normalize_columns,
+)
 from config import (
-    MODELS_DIR, LIVE_CSV, RETRAIN_ROW_THRESHOLD, CONTAMINATION,
-    ANOMALY_Z_THRESHOLD,
+    ANOMALY_ALERT_THRESHOLD,
+    ANOMALY_DATASET_CSV,
+    MODELS_DIR,
+    RANDOM_STATE,
 )
 
-# ── Feature columns for IF model ───────────────────────────────────────────────
-# Subset of ANOMALY_FEATURE_COLS that are numeric (task_priority is categorical)
-IF_NUMERIC_COLS = [
-    "cpu_pct", "ram_pct", "bandwidth_kbps", "packet_rate_pps",
-    "cpu_delta", "ram_delta",
-    "cpu_rolling_mean", "cpu_rolling_std",
-    "bw_rolling_mean", "bw_spike",
-]
+
+FEATURE_COLS = ANOMALY_FEATURE_COLS
+NUMERIC_COLS = ANOMALY_NUMERIC_COLS
+CATEGORICAL_COLS = ANOMALY_CATEGORICAL_COLS
+TARGET_COL = ANOMALY_TARGET_COL
+VALID_LABELS = {"Normal", "Alert"}
 
 
-# ── Training ───────────────────────────────────────────────────────────────────
+def _load_training_dataset(path: str) -> Optional[pd.DataFrame]:
+    """Load and normalize an anomaly dataset."""
+    if not path or not os.path.exists(path):
+        return None
 
-def train(dataset_path: str = LIVE_CSV):
-    """
-    Trains Isolation Forest on real live system data (NOT the Kaggle security set).
-    The model learns what normal looks like for THIS machine.
+    df = pd.read_csv(path)
+    df = normalize_columns(df)
+    df = ensure_columns(df, FEATURE_COLS + [TARGET_COL])
+    df = coerce_numeric_columns(df, NUMERIC_COLS)
+    df[NUMERIC_COLS] = df[NUMERIC_COLS].fillna(0.0)
 
-    Requires at least RETRAIN_ROW_THRESHOLD rows in dataset_path.
-    The CSV must have the unified schema columns (output of collect.py v2).
+    for col in CATEGORICAL_COLS:
+        df[col] = df[col].fillna("").astype(str)
 
-    Args:
-        dataset_path: path to a CSV with unified schema columns.
+    df[TARGET_COL] = df[TARGET_COL].map(normalize_anomaly_label)
+    df = df[df[TARGET_COL].isin(VALID_LABELS)]
+    return df if len(df) >= 50 else None
 
-    Returns:
-        (model, scaler) - also saved to MODELS_DIR.
-    """
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(
-            f"[AnomalyDetector] Dataset not found: {dataset_path}\n"
-            "Run Data/collect.py first to accumulate live metrics."
-        )
 
-    df = pd.read_csv(dataset_path)
-    print(f"[AnomalyDetector] Dataset: {dataset_path} -> {df.shape}")
+def _stratify_or_none(labels: pd.Series) -> pd.Series | None:
+    counts = labels.value_counts()
+    if len(counts) < 2 or counts.min() < 2:
+        return None
+    return labels
 
-    # Ensure required columns exist (fill missing temporal cols with 0)
-    for col in IF_NUMERIC_COLS:
-        if col not in df.columns:
-            print(f"  [warn] Column '{col}' missing - filling with 0")
-            df[col] = 0.0
 
-    df = df[IF_NUMERIC_COLS].dropna()
-    print(f"[AnomalyDetector] Training rows after dropna: {len(df)}")
-
-    if len(df) < 50:
-        raise ValueError(
-            f"[AnomalyDetector] Not enough data: {len(df)} rows (need ?50). "
-            "Collect more live data first."
-        )
-
-    scaler   = StandardScaler()
-    X_scaled = scaler.fit_transform(df.values)
-
-    model = IsolationForest(
-        n_estimators  = 200,
-        contamination = CONTAMINATION,
-        random_state  = 42,
-        n_jobs        = -1,
+def _build_pipeline() -> Pipeline:
+    preprocessor = ColumnTransformer(
+        transformers=[
+            (
+                "num",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="constant", fill_value=0.0)),
+                        ("scaler", StandardScaler()),
+                    ]
+                ),
+                NUMERIC_COLS,
+            ),
+            (
+                "cat",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="constant", fill_value="")),
+                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                CATEGORICAL_COLS,
+            ),
+        ]
     )
-    model.fit(X_scaled)
 
+    model = RandomForestClassifier(
+        n_estimators=300,
+        min_samples_leaf=2,
+        random_state=RANDOM_STATE,
+        n_jobs=1,
+        class_weight="balanced",
+    )
+
+    return Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("model", model),
+        ]
+    )
+
+
+def train(dataset_path: str | None = None) -> dict:
+    """
+    Train the anomaly detector.
+
+    Priority:
+      1. Explicit dataset_path
+      2. Base anomaly dataset
+    """
+    source = "none"
+    df = None
+
+    if dataset_path:
+        df = _load_training_dataset(dataset_path)
+        source = dataset_path
+    if df is None:
+        df = _load_training_dataset(ANOMALY_DATASET_CSV)
+        source = ANOMALY_DATASET_CSV
+    if df is None:
+        raise FileNotFoundError(
+            "No anomaly dataset found. Expected one of: "
+            f"{dataset_path!r} or {ANOMALY_DATASET_CSV!r}."
+        )
+
+    print(f"[AnomalyDetector] Dataset source : {source}")
+    print(f"[AnomalyDetector] Shape          : {df.shape}")
+    print(f"[AnomalyDetector] Label counts   : {df[TARGET_COL].value_counts().to_dict()}")
+
+    x = df[FEATURE_COLS].copy()
+    y = df[TARGET_COL].copy()
+
+    x_train, x_test, y_train, y_test = train_test_split(
+        x,
+        y,
+        test_size=0.2,
+        random_state=RANDOM_STATE,
+        stratify=_stratify_or_none(y),
+    )
+
+    pipeline = _build_pipeline()
+    pipeline.fit(x_train, y_train)
+
+    y_pred = pipeline.predict(x_test)
+    print("\n" + "=" * 60)
+    print("  AnomalyDetector Evaluation Report")
+    print("=" * 60)
+    print(classification_report(y_test, y_pred, zero_division=0))
+
+    accuracy = float((y_pred == y_test).mean())
     os.makedirs(MODELS_DIR, exist_ok=True)
-    joblib.dump(model,  os.path.join(MODELS_DIR, "anomaly_model.pkl"))
-    joblib.dump(scaler, os.path.join(MODELS_DIR, "anomaly_scaler.pkl"))
+    joblib.dump(pipeline, os.path.join(MODELS_DIR, "anomaly_model.pkl"))
+    print(f"[AnomalyDetector] Model saved to {MODELS_DIR}")
 
-    # Quick self-eval
-    preds  = model.predict(X_scaled)
-    n_anom = int((preds == -1).sum())
-    print(f"[AnomalyDetector] Training anomaly rate: {n_anom}/{len(df)} "
-          f"({100*n_anom/len(df):.1f}%) - expected ?{CONTAMINATION*100:.0f}%")
-    print("[AnomalyDetector] Model saved OK")
+    return {
+        "source": source,
+        "accuracy": round(accuracy, 4),
+        "label_counts": df[TARGET_COL].value_counts().to_dict(),
+    }
 
-    return model, scaler
-
-
-# ── Inference ──────────────────────────────────────────────────────────────────
 
 class AnomalyDetector:
-    """
-    Dual-mode anomaly detector.
-
-    Start-up behavior:
-      - If anomaly_model.pkl exists -> loads and uses Isolation Forest (Mode B).
-      - Otherwise -> operates in statistical bridge mode (Mode A) via FeatureEngineer.
-
-    In either case, .predict() returns the same output schema:
-        {
-            "label":         "Normal" | "Alert",
-            "anomaly_score": float,       # more negative = more anomalous
-            "is_anomaly":    bool,
-            "source":        "isolation_forest" | "stat_bridge" | "stat_bridge_warmup",
-        }
-    """
+    """Load the trained anomaly model and score live telemetry."""
 
     def __init__(self, models_dir: str = MODELS_DIR):
-        self.models_dir  = models_dir
-        self.model:  Optional[IsolationForest]  = None
-        self.scaler: Optional[StandardScaler]   = None
-        self.loaded: bool = False
-
-    # ── Load ─────────────────────────────────────────────────────────────────
+        self.models_dir = models_dir
+        self.model: Optional[Pipeline] = None
+        self.loaded = False
 
     def load(self) -> bool:
-        """
-        Attempts to load the IF model.
-        Returns True if successful, False if no model exists yet.
-        In the False case, the detector automatically falls back to stat bridge.
-        """
-        model_path  = os.path.join(self.models_dir, "anomaly_model.pkl")
-        scaler_path = os.path.join(self.models_dir, "anomaly_scaler.pkl")
-
-        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-            print("[AnomalyDetector] No IF model found -> using statistical bridge mode.")
+        """Load the anomaly model if it exists, else stay in bridge mode."""
+        model_path = os.path.join(self.models_dir, "anomaly_model.pkl")
+        if not os.path.exists(model_path):
+            print("[AnomalyDetector] No anomaly model found, using statistical bridge.")
             self.loaded = False
             return False
 
-        self.model  = joblib.load(model_path)
-        self.scaler = joblib.load(scaler_path)
+        self.model = joblib.load(model_path)
+        if not hasattr(self.model, "named_steps") or "model" not in self.model.named_steps:
+            print("[AnomalyDetector] Anomaly model is from an older schema; using bridge mode.")
+            self.model = None
+            self.loaded = False
+            return False
         self.loaded = True
-        print("[AnomalyDetector] Isolation Forest model loaded OK")
+        print("[AnomalyDetector] Supervised anomaly model loaded")
         return True
 
-    # ── Predict (IF mode) ──────────────────────────────────────────────────────
+    def _prepare_input_frame(self, feature_dict: dict) -> pd.DataFrame:
+        frame = pd.DataFrame([feature_dict])
+        frame = normalize_columns(frame)
+        frame = ensure_columns(frame, FEATURE_COLS)
+        frame = coerce_numeric_columns(frame, NUMERIC_COLS)
+        frame[NUMERIC_COLS] = frame[NUMERIC_COLS].fillna(0.0)
+        for col in CATEGORICAL_COLS:
+            frame[col] = frame[col].fillna("").astype(str)
+        return frame
 
     def predict(self, snap_input: dict) -> dict:
-        """
-        Runs Isolation Forest on a pre-computed feature dict.
-
-        Args:
-            snap_input: dict from SystemSnapshot.to_anomaly_input()
-                        (must contain IF_NUMERIC_COLS keys)
-
-        Returns:
-            {"label", "anomaly_score", "is_anomaly", "source"}
-        """
-        if not self.loaded:
+        """Predict whether the current telemetry looks normal or anomalous."""
+        if not self.loaded or self.model is None:
             raise RuntimeError(
-                "IF model not loaded. Call .load() first, or use "
-                "FeatureEngineer.statistical_anomaly() for bridge mode."
+                "Anomaly model not loaded. Call .load() first or use the statistical bridge."
             )
 
-        assert self.model is not None and self.scaler is not None, \
-            "Model or scaler not initialised — call .load() first"
+        frame = self._prepare_input_frame(snap_input)
+        classes = list(self.model.named_steps["model"].classes_)
+        probabilities = self.model.predict_proba(frame)[0]
 
-        # Build feature vector (numeric only)
-        row = [float(snap_input.get(col, 0.0)) for col in IF_NUMERIC_COLS]
-        X   = np.array(row).reshape(1, -1)
+        if "Alert" in classes:
+            alert_index = classes.index("Alert")
+            alert_probability = float(probabilities[alert_index])
+        else:
+            alert_probability = 0.0
 
-        try:
-            X_scaled  = self.scaler.transform(X)
-        except Exception as e:
-            raise RuntimeError(f"Scaler transform failed: {e}") from e
-
-        raw_pred = int(self.model.predict(X_scaled)[0])        # -1 or 1
-        score    = float(self.model.score_samples(X_scaled)[0])
-
-        label = "Alert" if raw_pred == -1 else "Normal"
+        label = "Alert" if alert_probability >= ANOMALY_ALERT_THRESHOLD else "Normal"
+        confidence = alert_probability if label == "Alert" else 1.0 - alert_probability
 
         return {
-            "label":         label,
-            "anomaly_score": round(score, 4),
-            "is_anomaly":    raw_pred == -1,
-            "source":        "isolation_forest",
+            "label": label,
+            "anomaly_score": round(alert_probability, 4),
+            "is_anomaly": label == "Alert",
+            "confidence": round(float(confidence), 4),
+            "source": "supervised_rf",
         }
 
-    def predict_batch(self, inputs: list) -> list:
-        """Runs predict() on a list of input dicts."""
-        return [self.predict(s) for s in inputs]
+    def predict_batch(self, inputs: list[dict]) -> list[dict]:
+        return [self.predict(item) for item in inputs]
 
     @property
     def mode(self) -> str:
-        return "isolation_forest" if self.loaded else "stat_bridge"
+        return "supervised_rf" if self.loaded else "stat_bridge"
 
-
-# ── Entry (train mode) ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys as _sys
-
-    dataset = _sys.argv[1] if len(_sys.argv) > 1 else LIVE_CSV
+    dataset = sys.argv[1] if len(sys.argv) > 1 else None
 
     print("=" * 60)
-    print("  SIT-Py | AnomalyDetector v2 | Training Mode")
+    print("  SIT-Py | AnomalyDetector | Training Mode")
     print("=" * 60)
-    print(f"  Dataset: {dataset}")
-    print()
-
-    model, scaler = train(dataset_path=dataset)
+    result = train(dataset_path=dataset)
+    print(f"\n[AnomalyDetector] Accuracy: {result['accuracy']:.2%}")
 
     print("\n" + "=" * 60)
     print("  Quick Inference Test")
     print("=" * 60)
     detector = AnomalyDetector()
     detector.load()
-
-    # Simulate a normal snapshot (no enriched temporal features yet -> defaults to 0)
-    normal = {
-        "cpu_pct": 10.0, "ram_pct": 55.0, "bandwidth_kbps": 100.0,
-        "packet_rate_pps": 50.0, "cpu_delta": 0.5, "ram_delta": 0.0,
-        "cpu_rolling_mean": 9.0, "cpu_rolling_std": 1.5,
-        "bw_rolling_mean": 120.0, "bw_spike": 0.8,
-    }
-    # Simulate a spike snapshot
-    spike = {
-        "cpu_pct": 92.0, "ram_pct": 87.0, "bandwidth_kbps": 50000.0,
-        "packet_rate_pps": 8000.0, "cpu_delta": 45.0, "ram_delta": 12.0,
-        "cpu_rolling_mean": 10.0, "cpu_rolling_std": 2.0,
-        "bw_rolling_mean": 200.0, "bw_spike": 250.0,
-    }
-
-    r1 = detector.predict(normal)
-    r2 = detector.predict(spike)
-    print(f"\n  Normal snapshot -> {r1}")
-    print(f"  Spike  snapshot -> {r2}")
+    print(
+        detector.predict(
+            {
+                "cpu_pct": 12.0,
+                "ram_pct": 58.0,
+                "bandwidth_kbps": 48.0,
+                "packet_rate_pps": 0.8,
+                "protocol": "",
+                "attack_type": "",
+                "severity": "",
+                "threat_type": "",
+            }
+        )
+    )

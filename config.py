@@ -1,41 +1,54 @@
 """
-config.py — SIT-Py Centralized Configuration
-Single source of truth for all paths, constants, and tunable parameters.
-All modules import from here — no more scattered os.path.join chains.
+Central project configuration for SIT-Py.
+
+All runtime modules should import paths and tunables from here instead of
+hard-coding dataset locations or thresholds.
 """
+
+from __future__ import annotations
+
 import os
 
-# ── Root ──────────────────────────────────────────────────────────────────────
-ROOT_DIR   = os.path.dirname(os.path.abspath(__file__))
 
-# ── Directories ───────────────────────────────────────────────────────────────
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Directories
 MODELS_DIR = os.path.join(ROOT_DIR, "Models")
-DATA_DIR   = os.path.join(ROOT_DIR, "Data")
-CORE_DIR   = os.path.join(ROOT_DIR, "Core")
+DATA_DIR = os.path.join(ROOT_DIR, "Data")
+DATASETS_DIR = os.path.join(DATA_DIR, "datasets")
+CORE_DIR = os.path.join(ROOT_DIR, "Core")
+PIPELINE_DIR = os.path.join(ROOT_DIR, "pipeline")
 
-# ── Data Files ────────────────────────────────────────────────────────────────
-LOG_PATH              = os.path.join(DATA_DIR, "sit_log.csv")
-LIVE_CSV              = os.path.join(DATA_DIR, "live_metrics.csv")
-KAGGLE_SECURITY_CSV   = os.path.join(DATA_DIR, "dataset.csv")
-KAGGLE_MOTHERBOARD_CSV= os.path.join(DATA_DIR,
-                            "Laptop_Motherboard_Health_Monitoring_Dataset.csv")
+# Runtime files
+LOG_PATH = os.path.join(DATA_DIR, "sit_log.csv")
+LIVE_CSV = os.path.join(DATA_DIR, "live_metrics.csv")
+RETRAIN_LOG = os.path.join(DATA_DIR, "retrain_log.csv")
 
-# ── Pipeline Tuning ───────────────────────────────────────────────────────────
-POLL_INTERVAL   = 2        # seconds between metric snapshots
-WINDOW_SIZE     = 15       # rolling context window for predictor + feature eng.
-MAX_HISTORY     = 60       # dashboard history ring-buffer size
-MAX_CSV_ROWS    = 5_000    # cap on live_metrics.csv before rotation
+# Base training datasets
+ANOMALY_DATASET_CSV = os.path.join(DATASETS_DIR, "anomaly_FINAL.csv")
+CLASSIFIER_DATASET_CSV = os.path.join(DATASETS_DIR, "classifier_FINAL.csv")
+PREDICTOR_DATASET_CSV = os.path.join(DATASETS_DIR, "predictor_FINAL.csv")
 
-# ── ML Thresholds ─────────────────────────────────────────────────────────────
-ANOMALY_Z_THRESHOLD   = 2.5     # std-deviations for statistical anomaly bridge
-RETRAIN_ROW_THRESHOLD = 500     # min live rows before retraining is triggered
-CONTAMINATION         = 0.10    # Isolation Forest contamination (lower than 0.2
-                                #   since real system anomalies are rarer)
+# Pipeline tuning
+POLL_INTERVAL = 2
+WINDOW_SIZE = 15
+MAX_HISTORY = 60
+MAX_CSV_ROWS = 5_000
 
-# ── Workload Thresholds (rule-based labels for live training) ─────────────────
+# Retraining
+RETRAIN_ROW_THRESHOLD = 500
+LIVE_DATA_WEIGHT = 3
+LABELED_LOG_WEIGHT = 2
+RANDOM_STATE = 42
+
+# ML thresholds
+ANOMALY_Z_THRESHOLD = 2.5
+CONTAMINATION = 0.10
+ANOMALY_ALERT_THRESHOLD = 0.60
+
+# Workload thresholds used to label live data when no label exists yet.
 WORKLOAD_THRESHOLDS = {
     "Critical": {"cpu": 75, "ram": 85},
-    "High":     {"cpu": 50, "ram": 70},
-    "Medium":   {"cpu": 20, "ram": 50},
-    # else → Low
+    "High": {"cpu": 50, "ram": 70},
+    "Medium": {"cpu": 20, "ram": 50},
 }
