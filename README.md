@@ -1,4 +1,4 @@
-# SIT-Py
+# Aurora ML is sit branch made in python
 
 SIT-Py is the Python prototype of the System Insight Toolkit. It watches live system telemetry, enriches it with rolling features, runs three ML agents on every cycle, and exposes the results in both a terminal loop and a Streamlit dashboard.
 
