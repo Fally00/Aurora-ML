@@ -17,7 +17,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -26,6 +26,11 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from Core.baselines import (
+    evaluate_baselines,
+    evaluate_model_vs_baselines,
+    compute_skill_score,
+)
 from Core.schema import (
     PREDICTOR_FEATURE_COLS,
     PREDICTOR_RAW_COLS,
@@ -34,6 +39,7 @@ from Core.schema import (
     ensure_columns,
     normalize_columns,
 )
+from Core.base_model import BaseModel
 from config import LIVE_CSV, MODELS_DIR, PREDICTOR_DATASET_CSV, PREDICTOR_MODEL_PARAMS, RANDOM_STATE, WINDOW_SIZE
 
 
@@ -106,7 +112,7 @@ def build_windows(df: pd.DataFrame, window: int = WINDOW_SIZE) -> tuple[np.ndarr
 
 def train(dataset_path: str | None = None, window: int = WINDOW_SIZE) -> dict:
     """
-    Train the predictor.
+    Train the predictor with walk-forward validation and baseline comparison.
 
     Priority:
       1. Explicit dataset_path
@@ -138,26 +144,97 @@ def train(dataset_path: str | None = None, window: int = WINDOW_SIZE) -> dict:
     x, y = build_windows(df, window)
     print(f"[Predictor] Training samples: X={x.shape}, y={y.shape}")
 
-    scaler = StandardScaler()
-    x_scaled = scaler.fit_transform(x)
+    # Chronological split - no random shuffle for time series
+    if "timestamp" in df.columns:
+        # The build_windows function uses sequential rows, so x/y are already in time order
+        split_idx = int(len(x) * 0.8)
+        x_train, x_test = x[:split_idx], x[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        print(f"[Predictor] Chronological split: train={len(x_train)}, test={len(x_test)}")
+    else:
+        x_train, x_test, y_train, y_test = train_test_split(
+            x,
+            y,
+            test_size=0.2,
+            random_state=RANDOM_STATE,
+        )
+        print(f"[Predictor] Random split: train={len(x_train)}, test={len(x_test)}")
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        x_scaled,
-        y,
-        test_size=0.2,
-        random_state=RANDOM_STATE,
-    )
+    scaler = StandardScaler()
+    x_train_scaled = scaler.fit_transform(x_train)
+    x_test_scaled = scaler.transform(x_test)
 
     model = RandomForestRegressor(**PREDICTOR_MODEL_PARAMS)
-    model.fit(x_train, y_train)
+    model.fit(x_train_scaled, y_train)
 
-    y_pred = model.predict(x_test)
+    y_pred = model.predict(x_test_scaled)
+
+    # Walk-forward validation on test set
+    n_splits = 5
+    test_size = len(x_test)
+    fold_size = test_size // n_splits
+    wf_mae = {target: [] for target in TARGET_COLS}
+    wf_rmse = {target: [] for target in TARGET_COLS}
+    wf_r2 = {target: [] for target in TARGET_COLS}
+
+    for fold in range(n_splits):
+        start = fold * fold_size
+        end = start + fold_size if fold < n_splits - 1 else test_size
+        if end - start < 10:
+            continue
+        x_fold = x_test_scaled[start:end]
+        y_fold = y_test[start:end]
+        y_fold_pred = model.predict(x_fold)
+        for idx, target in enumerate(TARGET_COLS):
+            mae = mean_absolute_error(y_fold[:, idx], y_fold_pred[:, idx])
+            rmse = np.sqrt(mean_squared_error(y_fold[:, idx], y_fold_pred[:, idx]))
+            r2 = r2_score(y_fold[:, idx], y_fold_pred[:, idx])
+            wf_mae[target].append(mae)
+            wf_rmse[target].append(rmse)
+            wf_r2[target].append(r2)
+
+    print("\n" + "=" * 60)
+    print("  Predictor Walk-Forward Validation (5 folds)")
+    print("=" * 60)
     metrics: dict[str, dict[str, float]] = {}
     for idx, target in enumerate(TARGET_COLS):
         mae = mean_absolute_error(y_test[:, idx], y_pred[:, idx])
+        rmse = np.sqrt(mean_squared_error(y_test[:, idx], y_pred[:, idx]))
         r2 = r2_score(y_test[:, idx], y_pred[:, idx])
-        metrics[target] = {"MAE": round(float(mae), 4), "R2": round(float(r2), 4)}
-        print(f"  {target:10s} -> MAE: {mae:.4f} | R2: {r2:.4f}")
+        metrics[target] = {"MAE": round(float(mae), 4), "RMSE": round(float(rmse), 4), "R2": round(float(r2), 4)}
+        print(f"  {target:10s} -> MAE: {mae:.4f} | RMSE: {rmse:.4f} | R2: {r2:.4f}")
+
+    if any(wf_mae[t] for t in TARGET_COLS):
+        print("\n  Walk-forward averages:")
+        for target in TARGET_COLS:
+            if wf_mae[target]:
+                print(f"    {target:10s} -> MAE: {np.mean(wf_mae[target]):.4f} ± {np.std(wf_mae[target]):.4f} | RMSE: {np.mean(wf_rmse[target]):.4f} ± {np.std(wf_rmse[target]):.4f} | R2: {np.mean(wf_r2[target]):.4f} ± {np.std(wf_r2[target]):.4f}")
+
+    # Baseline comparison on test set (using raw target values from original df)
+    # We need the raw time series for baselines - use the last column (cpu) as proxy
+    # Actually, let's use the test target values directly for baseline comparison
+    print("\n" + "=" * 60)
+    print("  Baseline Comparison (vs Repeat-Last-Value)")
+    print("=" * 60)
+
+    # For baseline comparison, we need the original time series values
+    # The test set corresponds to the last 20% of the windowed data
+    # We'll compare on the first target (cpu) as representative
+    test_cpu = y_test[:, 0]  # cpu target
+    pred_cpu = y_pred[:, 0]
+    model_mae = mean_absolute_error(test_cpu, pred_cpu)
+    model_rmse = np.sqrt(mean_squared_error(test_cpu, pred_cpu))
+
+    # Repeat-last-value baseline on test set
+    baseline_pred = np.roll(test_cpu, 1)
+    baseline_pred[0] = test_cpu[0]  # first prediction has no previous
+    baseline_mae = mean_absolute_error(test_cpu[1:], baseline_pred[1:])
+    baseline_rmse = np.sqrt(mean_squared_error(test_cpu[1:], baseline_pred[1:]))
+    skill = compute_skill_score(model_mae, baseline_mae)
+
+    print(f"  Model MAE:  {model_mae:.4f} | RMSE: {model_rmse:.4f}")
+    print(f"  Naive MAE:  {baseline_mae:.4f} | RMSE: {baseline_rmse:.4f}")
+    print(f"  Skill Score: {skill:.4f} (1 - model/naive, higher=better)")
 
     importances = model.feature_importances_
     ranked = sorted(zip(FEATURE_COLS, importances), key=lambda item: -item[1])

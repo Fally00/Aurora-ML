@@ -25,6 +25,7 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from Core.baselines import evaluate_baselines, evaluate_model_vs_baselines
 from Core.schema import (
     CLASSIFIER_FEATURE_COLS,
     CLASSIFIER_TARGET_COL,
@@ -33,6 +34,7 @@ from Core.schema import (
     normalize_columns,
     normalize_workload_label,
 )
+from Core.base_model import BaseModel
 from config import (
     CLASSIFIER_DATASET_CSV,
     CLASSIFIER_MODEL_PARAMS,
@@ -133,13 +135,24 @@ def train(dataset_path: str | None = None) -> dict:
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(x)
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        x_scaled,
-        y,
-        test_size=0.2,
-        random_state=RANDOM_STATE,
-        stratify=_stratify_or_none(y),
-    )
+    # Chronological split by timestamp if available
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        split_idx = int(len(df) * 0.8)
+        x_train = x_scaled[:split_idx]
+        y_train = y[:split_idx]
+        x_test = x_scaled[split_idx:]
+        y_test = y[split_idx:]
+        print(f"[WorkloadClassifier] Chronological split: train={len(x_train)}, test={len(x_test)}")
+    else:
+        x_train, x_test, y_train, y_test = train_test_split(
+            x_scaled,
+            y,
+            test_size=0.2,
+            random_state=RANDOM_STATE,
+            stratify=_stratify_or_none(y),
+        )
+        print(f"[WorkloadClassifier] Random split: train={len(x_train)}, test={len(x_test)}")
 
     model = RandomForestClassifier(**CLASSIFIER_MODEL_PARAMS)
     model.fit(x_train, y_train)

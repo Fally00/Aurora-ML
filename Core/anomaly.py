@@ -27,6 +27,7 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from Core.baselines import evaluate_baselines, evaluate_model_vs_baselines
 from Core.schema import (
     ANOMALY_CATEGORICAL_COLS,
     ANOMALY_FEATURE_COLS,
@@ -37,6 +38,7 @@ from Core.schema import (
     normalize_anomaly_label,
     normalize_columns,
 )
+from Core.base_model import BaseModel
 from config import (
     ANOMALY_ALERT_THRESHOLD,
     ANOMALY_DATASET_CSV,
@@ -142,16 +144,26 @@ def train(dataset_path: str | None = None) -> dict:
     print(f"[AnomalyDetector] Shape          : {df.shape}")
     print(f"[AnomalyDetector] Label counts   : {df[TARGET_COL].value_counts().to_dict()}")
 
-    x = df[FEATURE_COLS].copy()
-    y = df[TARGET_COL].copy()
-
-    x_train, x_test, y_train, y_test = train_test_split(
-        x,
-        y,
-        test_size=0.2,
-        random_state=RANDOM_STATE,
-        stratify=_stratify_or_none(y),
-    )
+    # Chronological split by timestamp if available, otherwise by index
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        split_idx = int(len(df) * 0.8)
+        x_train = df.iloc[:split_idx][FEATURE_COLS]
+        y_train = df.iloc[:split_idx][TARGET_COL]
+        x_test = df.iloc[split_idx:][FEATURE_COLS]
+        y_test = df.iloc[split_idx:][TARGET_COL]
+        print(f"[AnomalyDetector] Chronological split: train={len(x_train)}, test={len(x_test)}")
+    else:
+        x = df[FEATURE_COLS].copy()
+        y = df[TARGET_COL].copy()
+        x_train, x_test, y_train, y_test = train_test_split(
+            x,
+            y,
+            test_size=0.2,
+            random_state=RANDOM_STATE,
+            stratify=_stratify_or_none(y),
+        )
+        print(f"[AnomalyDetector] Random split: train={len(x_train)}, test={len(x_test)}")
 
     pipeline = _build_pipeline()
     pipeline.fit(x_train, y_train)
