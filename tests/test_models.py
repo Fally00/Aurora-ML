@@ -102,11 +102,11 @@ def test_model_not_loaded_raises(temp_model_dir):
         detector.predict(snap.to_anomaly_input())
 
     classifier = WorkloadClassifier(models_dir=temp_model_dir)
-    with pytest.raises(RuntimeError, match="Call .load\(\) before .predict\(\)"):
+    with pytest.raises(RuntimeError, match=r"Call .load\(\) before .predict\(\)"):
         classifier.predict(snap.to_classifier_input())
 
     predictor = ResourcePredictor(models_dir=temp_model_dir)
-    with pytest.raises(RuntimeError, match="Call .load\(\) before .predict\(\)"):
+    with pytest.raises(RuntimeError, match=r"Call .load\(\) before .predict\(\)"):
         predictor.predict(snap.to_predictor_input())
 
 

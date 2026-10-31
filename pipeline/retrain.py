@@ -58,11 +58,21 @@ def _read_csv_safe(path: str) -> pd.DataFrame:
     """Read a CSV, tolerating older malformed log rows."""
     if not os.path.exists(path):
         return pd.DataFrame()
+    return pd.read_csv(path, engine="python", on_bad_lines="warn")
 
-    try:
-        return pd.read_csv(path)
-    except Exception:
-        return pd.read_csv(path, engine="python", on_bad_lines="warn")
+
+def _validate_resource_bounds(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce and clip CPU, RAM, and disk percentages before training."""
+    result = df.copy()
+    for column in ("cpu_pct", "ram_pct", "disk_pct"):
+        if column not in result.columns:
+            continue
+        values = pd.to_numeric(result[column], errors="coerce")
+        invalid = values.notna() & ((values < 0) | (values > 100))
+        if invalid.any():
+            print(f"  [data] clipping {int(invalid.sum())} out-of-range rows in {column}")
+        result[column] = values.clip(0, 100)
+    return result
 
 
 def _load_runtime_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -72,9 +82,11 @@ def _load_runtime_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     if not live_df.empty:
         live_df = normalize_columns(live_df)
+        live_df = _validate_resource_bounds(live_df)
         print(f"  [data] live_metrics.csv : {len(live_df):,} rows")
     if not log_df.empty:
         log_df = normalize_columns(log_df)
+        log_df = _validate_resource_bounds(log_df)
         print(f"  [data] sit_log.csv      : {len(log_df):,} rows")
 
     return live_df, log_df
@@ -115,6 +127,7 @@ def _load_base_frame(path: str, columns: list[str]) -> pd.DataFrame:
     df = ensure_columns(df, columns)
     numeric_cols = [col for col in columns if col not in ANOMALY_CATEGORICAL_COLS and col not in {ANOMALY_TARGET_COL, CLASSIFIER_TARGET_COL}]
     df = coerce_numeric_columns(df, numeric_cols)
+    df = _validate_resource_bounds(df)
     return df.dropna(subset=[col for col in numeric_cols if col in df.columns])
 
 

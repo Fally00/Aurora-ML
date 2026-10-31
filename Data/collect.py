@@ -242,6 +242,7 @@ def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
 
 class Collector:
     def __init__(self):
+        """Create a collector with CSV schema validation pending."""
         self._schema_initialized = False
 
     def _ensure_csv_schema(self, columns: list[str]) -> None:
@@ -264,7 +265,7 @@ class Collector:
         os.replace(LIVE_CSV, backup_path)
         print(f"[Collector] Existing CSV schema changed, moved old file to {backup_path}")
 
-    def _flush_to_csv(self, rows: list):
+    def _flush_to_csv(self, rows: list) -> None:
         """Appends rows to LIVE_CSV; writes header only on first write."""
         df = pd.DataFrame(rows)
         if not self._schema_initialized:
