@@ -27,15 +27,24 @@ The whole project now shares one normalization layer in `Core/schema.py`, so liv
 SIT-Py/
 ├── Core/
 │   ├── anomaly.py
+│   ├── alerts.py
+│   ├── base_model.py
 │   ├── classifier.py
 │   ├── feature_engineering.py
 │   ├── predictor.py
-│   └── schema.py
+│   ├── schema.py
+│   └── schema_v2.py
 ├── Dashboard/
 │   └── app.py
 ├── Data/
 │   ├── collect.py
+│   ├── collector_v2.py
+│   ├── eventlog_monitor.py
+│   ├── file_monitor.py
 │   ├── preprocess.py
+│   ├── storage.py
+│   ├── verify_nvml.py
+│   ├── watcher_config.json
 │   ├── live_metrics.csv
 │   ├── sit_log.csv
 │   ├── retrain_log.csv
@@ -50,16 +59,10 @@ SIT-Py/
 │       ├── predictor_distributed.csv
 │       ├── dataset.csv
 │       └── Laptop_Motherboard_Health_Monitoring_Dataset.csv
-├── Models/
-│   ├── anomaly_model.pkl
-│   ├── classifier_model.pkl
-│   ├── classifier_scaler.pkl
-│   ├── classifier_target_encoder.pkl
-│   ├── predictor_model.pkl
-│   └── predictor_scaler.pkl
 ├── pipeline/
 │   └── retrain.py
 ├── config.py
+├── requirements.txt
 ├── main.py
 └── README.md
 ```
@@ -76,6 +79,7 @@ Central source of truth for:
 - retrain thresholds
 - anomaly bridge threshold
 - workload label thresholds
+- model artifact directory (`SITPY_MODELS_DIR`, default `~/.sit-py/models`)
 
 The rest of the project should import from here instead of hardcoding paths or constants.
 
@@ -172,7 +176,17 @@ Inference uses:
 - numeric telemetry: CPU, RAM, bandwidth, packet rate
 - categorical context: protocol, attack type, severity, threat type
 
-If `Models/anomaly_model.pkl` does not exist, runtime falls back to the statistical bridge in `FeatureEngineer`.
+If no verified anomaly model is available, runtime falls back to the statistical bridge in `FeatureEngineer`.
+
+Trained models and their SHA-256 sidecars are stored outside the repository by default at `~/.sit-py/models`. Set `SITPY_MODELS_DIR` before training or starting the app to use another private model directory. The repository's legacy `Models/` files are no longer loaded; retrain the models to create verified local artifacts:
+
+```bash
+python Core/anomaly.py
+python Core/classifier.py
+python Core/predictor.py
+```
+
+Install the application dependencies with `pip install -r requirements.txt`. Run the test suite with `pip install pytest pytest-cov` followed by `pytest tests/ --cov=Core --cov=Data --cov=pipeline`.
 
 ## Runtime Entry Points
 
@@ -213,6 +227,26 @@ Run it with:
 ```bash
 python -m streamlit run Dashboard/app.py
 ```
+
+### Module B passive file and event-log monitor
+
+Install the pinned dependencies, then start the notification-based monitor in a separate terminal:
+
+```bash
+python -m Data.file_monitor
+```
+
+Edit `Data/watcher_config.json` to adjust watched roots, exclusions, critical files, burst grouping, and cooldowns. Windows Event Log subscriptions need an elevated terminal; without it the monitor logs one warning and continues watching files. Module B only records observations and alerts; it never changes or removes files.
+
+### Collector v2 (GPU and SQLite telemetry)
+
+Install dependencies with `pip install -r requirements.txt`. On Windows, CPU temperature and per-core clock readings also require LibreHardwareMonitor to be running with its WMI interface enabled. Start a tagged 10-minute collection with:
+
+```bash
+python -m Data.collector_v2 --tag gaming --duration 600
+```
+
+Change the active workload tag during collection by writing one supported tag (`idle`, `gaming`, `compile`, `browsing`, or `stress`) to `Data/workload_tag.txt`. SQLite data is stored in `Data/db/aurora_metrics.db` using daily tables and a seven-day retention policy. Run `python -m Data.verify_nvml` on an NVIDIA-equipped host to check driver and sensor access.
 
 ## Data Flow
 

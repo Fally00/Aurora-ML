@@ -1,0 +1,39 @@
+{
+  "watch_roots": [
+    "%USERPROFILE%\\Desktop",
+    "%USERPROFILE%\\Documents",
+    "%USERPROFILE%\\Downloads",
+    "%USERPROFILE%\\Music",
+    "%USERPROFILE%\\Pictures",
+    "%USERPROFILE%\\Videos",
+    "%USERPROFILE%\\OneDrive"
+  ],
+  "startup_roots": [
+    "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
+    "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+  ],
+  "temp_roots": ["%TEMP%"],
+  "critical_paths": ["%SystemRoot%\\System32\\drivers\\etc\\hosts"],
+  "executable_extensions": [
+    ".exe", ".dll", ".sys", ".scr", ".com", ".msi", ".msp",
+    ".bat", ".cmd", ".ps1", ".vbs", ".js", ".jar", ".lnk"
+  ],
+  "excluded_directory_names": [
+    "cache", "caches", "gpucache", "code cache", "shadercache",
+    "node_modules", "build", "dist", ".git", ".svn", "steamapps",
+    "steam", "epic games", "xboxgames", "gog galaxy", "origin games",
+    "ea games"
+  ],
+  "excluded_path_fragments": [
+    "\\Google\\Chrome\\User Data\\",
+    "\\Microsoft\\Edge\\User Data\\",
+    "\\Mozilla\\Firefox\\Profiles\\",
+    "\\AppData\\Local\\Temp\\",
+    "\\AppData\\Local\\Packages\\"
+  ],
+  "burst_window_seconds": 2.0,
+  "burst_threshold": 25,
+  "max_batch_events": 2048,
+  "event_queue_size": 4096,
+  "cooldown_seconds": 60
+}
