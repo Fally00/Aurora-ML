@@ -11,12 +11,16 @@ from Core.schema import (
     coerce_numeric_columns,
     normalize_anomaly_label,
     normalize_workload_label,
+    SystemSnapshot,
+    ANOMALY_FEATURE_COLS,
+    CLASSIFIER_FEATURE_COLS,
+    PREDICTOR_FEATURE_COLS,
 )
 
 
 def test_normalize_columns():
     """Test column name normalization."""
-    df = pd.DataFrame({"CPUUsage": [1.0], "RAM_Usage": [2.0], "Unknown": [3.0]})
+    df = pd.DataFrame({"CPUUsage": [1.0], "RAMUsage": [2.0], "Unknown": [3.0]})
     result = normalize_columns(df)
     assert "cpu_pct" in result.columns
     assert "ram_pct" in result.columns
@@ -40,10 +44,12 @@ def test_coerce_numeric_columns():
     df = pd.DataFrame({"a": ["1.0", "2.0", "invalid"], "b": ["x", "y", "z"]})
     result = coerce_numeric_columns(df, ["a", "b"])
     assert pd.api.types.is_numeric_dtype(result["a"])
-    assert not pd.api.types.is_numeric_dtype(result["b"])  # b remains object because all non-numeric
+    # In pandas 3.x, all-NaN columns become float dtype
+    assert pd.api.types.is_numeric_dtype(result["b"])
     assert result["a"].iloc[0] == 1.0
     assert result["a"].iloc[1] == 2.0
     assert pd.isna(result["a"].iloc[2])  # invalid becomes NaN
+    assert pd.isna(result["b"].iloc[0])  # all non-numeric become NaN
 
 
 def test_normalize_anomaly_label():
@@ -70,3 +76,112 @@ def test_normalize_workload_label():
     assert normalize_workload_label("cascading_failure") == "High"
     assert normalize_workload_label("total_outage") == "Critical"
     assert normalize_workload_label("unknown") == "Unknown"  # falls back to title
+
+
+# ── Schema round-trip tests ──
+
+def test_schema_roundtrip_anomaly():
+    """Test anomaly schema: normalize -> ensure -> coerce preserves data."""
+    raw = pd.DataFrame({
+        "CPUUsage": [12.5, 45.0],
+        "RAMUsage": [60.0, 70.0],
+        "Bandwidth": [100.0, 200.0],
+        "Packet_Rate": [10.0, 20.0],
+        "protocol": ["TCP", "UDP"],
+        "label": ["Normal", "Alert"],
+    })
+    # Round-trip
+    df = normalize_columns(raw)
+    df = ensure_columns(df, ANOMALY_FEATURE_COLS + ["label"])
+    df = coerce_numeric_columns(df, ["cpu_pct", "ram_pct", "bandwidth_kbps", "packet_rate_pps"])
+
+    assert list(df.columns) == ANOMALY_FEATURE_COLS + ["label"]
+    assert len(df) == 2
+    assert df["cpu_pct"].tolist() == [12.5, 45.0]
+    assert df["protocol"].tolist() == ["TCP", "UDP"]
+    assert df["label"].tolist() == ["Normal", "Alert"]
+
+
+def test_schema_roundtrip_classifier():
+    """Test classifier schema round-trip."""
+    raw = pd.DataFrame({
+        "CPUUsage": [12.5, 45.0, 80.0],
+        "RAMUsage": [60.0, 70.0, 90.0],
+        "Bandwidth": [100.0, 200.0, 300.0],
+        "Packet_Rate": [10.0, 20.0, 30.0],
+        "Task_Priority": ["Low", "Medium", "Critical"],
+    })
+    df = normalize_columns(raw)
+    df = ensure_columns(df, CLASSIFIER_FEATURE_COLS + ["task_priority"])
+    df = coerce_numeric_columns(df, CLASSIFIER_FEATURE_COLS)
+
+    assert list(df.columns) == CLASSIFIER_FEATURE_COLS + ["task_priority"]
+    assert len(df) == 3
+    assert df["task_priority"].tolist() == ["Low", "Medium", "Critical"]
+
+
+def test_schema_roundtrip_predictor():
+    """Test predictor schema round-trip."""
+    raw = pd.DataFrame({
+        "CPUUsage": [12.5, 45.0],
+        "RAMUsage": [60.0, 70.0],
+        "DiskUsage": [30.0, 40.0],
+        "Bandwidth": [100.0, 200.0],
+        "Packet_Rate": [10.0, 20.0],
+    })
+    df = normalize_columns(raw)
+    df = ensure_columns(df, PREDICTOR_FEATURE_COLS)
+    df = coerce_numeric_columns(df, PREDICTOR_FEATURE_COLS)
+
+    assert list(df.columns) == PREDICTOR_FEATURE_COLS
+    assert len(df) == 2
+
+
+def test_system_snapshot_to_anomaly_input():
+    """Test SystemSnapshot.to_anomaly_input() matches ANOMALY_FEATURE_COLS."""
+    snap = SystemSnapshot(
+        cpu_pct=50.0,
+        ram_pct=60.0,
+        bandwidth_kbps=100.0,
+        packet_rate_pps=10.0,
+        protocol="TCP",
+    )
+    inp = snap.to_anomaly_input()
+    assert set(inp.keys()) == set(ANOMALY_FEATURE_COLS)
+    assert inp["cpu_pct"] == 50.0
+    assert inp["protocol"] == "TCP"
+
+
+def test_system_snapshot_to_classifier_input():
+    """Test SystemSnapshot.to_classifier_input() matches CLASSIFIER_FEATURE_COLS."""
+    snap = SystemSnapshot(
+        cpu_pct=50.0,
+        ram_pct=60.0,
+        bandwidth_kbps=100.0,
+        packet_rate_pps=10.0,
+    )
+    inp = snap.to_classifier_input()
+    assert set(inp.keys()) == set(CLASSIFIER_FEATURE_COLS)
+
+
+def test_system_snapshot_to_predictor_input():
+    """Test SystemSnapshot.to_predictor_input() matches PREDICTOR_FEATURE_COLS."""
+    snap = SystemSnapshot(
+        cpu_pct=50.0,
+        ram_pct=60.0,
+        disk_pct=30.0,
+        bandwidth_kbps=100.0,
+        packet_rate_pps=10.0,
+        cpu_delta=1.0,
+        ram_delta=0.5,
+        cpu_rolling_mean=48.0,
+        ram_rolling_mean=59.0,
+        cpu_rolling_std=2.0,
+        ram_rolling_std=1.0,
+        bw_rolling_mean=95.0,
+        bw_spike=1.05,
+    )
+    inp = snap.to_predictor_input()
+    assert set(inp.keys()) == set(PREDICTOR_FEATURE_COLS)
+    assert inp["cpu_delta"] == 1.0
+    assert inp["bw_spike"] == 1.05
