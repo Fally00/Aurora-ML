@@ -23,7 +23,13 @@ import os
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Directories
-MODELS_DIR = os.path.join(ROOT_DIR, "Models")
+# Keep executable pickle artifacts outside the source checkout. Override this
+# path with SITPY_MODELS_DIR when deploying or sharing a model directory.
+MODELS_DIR = os.path.abspath(
+    os.path.expanduser(
+        os.environ.get("SITPY_MODELS_DIR", os.path.join("~", ".sit-py", "models"))
+    )
+)
 DATA_DIR = os.path.join(ROOT_DIR, "Data")
 DATASETS_DIR = os.path.join(DATA_DIR, "datasets")
 CORE_DIR = os.path.join(ROOT_DIR, "Core")
@@ -62,6 +68,36 @@ WORKLOAD_THRESHOLDS = {
     "High": {"cpu": 50, "ram": 70},
     "Medium": {"cpu": 20, "ram": 50},
 }
+
+# --- Phase 2 Collector v2 ---
+# Polling interval in seconds (v2 uses 1s)
+POLL_INTERVAL_V2 = 1
+ROLLING_WINDOW_V2 = 60
+DB_FLUSH_INTERVAL = 1.0
+DB_BATCH_SIZE = 10
+
+# Machine identifier: "laptop" | "desktop" | auto-detect via hostname
+MACHINE_ID = os.environ.get("AURORA_MACHINE_ID", "laptop")
+
+# Schema version for v2 snapshots
+SCHEMA_VERSION = 2
+
+# SQLite database path (WAL mode)
+DB_DIR = os.path.join(DATA_DIR, "db")
+DB_PATH = os.path.join(DB_DIR, "aurora_metrics.db")
+
+# Data retention (days)
+RETENTION_DAYS = 7
+
+# Workload tag file (re-read each cycle)
+WORKLOAD_TAG_FILE = os.path.join(DATA_DIR, "workload_tag.txt")
+
+# Valid workload tags
+VALID_WORKLOAD_TAGS = {"idle", "gaming", "compile", "browsing", "stress"}
+
+# NVML/LHM graceful degradation
+NVML_WARNING_LOGGED = False
+LHM_WARNING_LOGGED = False
 
 # --- Model Hyperparameters ---
 ANOMALY_MODEL_PARAMS = {
