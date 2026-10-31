@@ -254,6 +254,18 @@ Install `requirements.txt`, then launch the four-window tray app with `python -m
 
 Build the Windows one-file app with `./build_aurora.ps1` or `python -m PyInstaller --clean --noconfirm Aurora.spec`. The executable writes its SQLite data under `%LOCALAPPDATA%\Aurora\Data`; it does not write into the temporary PyInstaller extraction directory. Run elevated only when Windows Event Log clear subscriptions are needed; file watching and telemetry work without elevation.
 
+### Stage 5 checks and evaluation
+
+Run `pytest tests/` for the unit suite. The scenario runner uses an isolated watched tree and SQLite database; it creates a text edit, a harmless `.exe` data stub that it never executes, and a 100-file copy. The log-clear case is synthetic and never clears an operating-system log. Because the default set includes that case, opt in explicitly on a test VM:
+
+```powershell
+python -m scripts.run_scenarios --i-am-on-a-test-vm
+python -m scripts.alert_metrics Data/scenario_runs/<run-id>
+python -m scripts.overhead --pid <Aurora-PID> --minutes 5 --output Data/scenario_runs/overhead.json
+```
+
+The metrics report scores alerts against the scenario labels and estimates false alarms per hour from the run duration (or `--observation-hours`). The overhead check compares mean whole-system CPU use against <1% and peak RSS against <150 MB. Frame-time impact is a manual A/B check: capture the same game/workload frame-time trace for a fixed interval with Aurora stopped, then with Aurora running, and compare median and 95th-percentile frame times.
+
 ## Data Flow
 
 ### Live Files

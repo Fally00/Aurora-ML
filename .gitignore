@@ -17,6 +17,7 @@ Data/sit_log*.csv
 Data/retrain_log.csv
 Data/preprocessed/
 Data/db/
+Data/scenario_runs/
 build/
 dist/
 
