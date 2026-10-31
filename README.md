@@ -1,382 +1,169 @@
-# Aurora ML is sit branch made in python
+# Aurora
 
-SIT-Py is the Python prototype of the System Insight Toolkit. It watches live system telemetry, enriches it with rolling features, runs three ML agents on every cycle, and exposes the results in both a terminal loop and a Streamlit dashboard.
+Aurora is a Windows passive watcher and system telemetry tray app in the SIT-Py repository. It records system measurements and file/event observations, then notifies the user. It does not execute, modify, quarantine, or delete watched files, and it does not automatically remediate anything.
 
-The current codebase is built around a shared runtime schema and separate datasets per agent:
+The repository also contains the earlier SIT-Py machine-learning prototype. Its terminal and Streamlit entry points are separate from Aurora's tray app.
 
-- `anomaly` uses anomaly-focused labeled data
-- `classifier` uses workload-priority labeled data
-- `predictor` uses resource time-series style data
+## Project status
 
-## Current Architecture
+| Phase | Status |
+|---|---|
+| 1. Repository and ML pipeline cleanup | Implemented; the legacy ML tests are in `tests/`. |
+| 2. Collector v2 and SQLite telemetry | Implemented with mocked tests. Real 10-minute sensor acceptance on the target hardware is still pending. |
+| 3. Module B file and Event Log monitor | Implemented with rule, storage, and mocked Event Log tests. The scenario runner has not been exercised here because the OS watcher dependency could not be installed. |
+| 4. Tray UI and packaging | UI and one-file PyInstaller recipe are implemented. The `.exe` has not been built or launched in this environment. |
+| 5. Tests and evaluation tools | Implemented. The suite passed **117 tests** on 2026-10-31. Scenario results and live overhead measurements still need to be collected on a Windows machine with the dependencies installed. |
 
-The runtime path is:
+The Aurora workload classifier and resource-abuse detector are interfaces only. The tray reports **not trained yet** for both; no ML detector is enabled in Aurora.
 
-1. `Data/collect.py` captures a raw `SystemSnapshot`
-2. `Core/feature_engineering.py` adds deltas, rolling means/std, and spike signals
-3. `Core/anomaly.py` scores anomaly risk
-4. `Core/classifier.py` predicts workload level
-5. `Core/predictor.py` forecasts next-cycle CPU / RAM / disk usage
-6. `main.py` and `Dashboard/app.py` log and display the results
+## Requirements
 
-The whole project now shares one normalization layer in `Core/schema.py`, so live telemetry, old logs, retrain inputs, and base datasets all map into the same column names before training or inference.
+- Windows 10 or 11, 64-bit, for the tray app, filesystem notifications, and packaged executable.
+- Python 3.12 64-bit is recommended for this repository's pinned NumPy and scikit-learn versions. Their Windows wheels include CPython 3.12 builds: [NumPy 1.26.4](https://pypi.org/project/numpy/1.26.4/) and [scikit-learn 1.5.1](https://pypi.org/project/scikit-learn/1.5.1/).
+- Install the pinned packages from `requirements.txt`. This includes PySide6, pyqtgraph, watchdog, psutil, PyInstaller, and the legacy ML packages.
+- NVIDIA GPU measurements require an installed NVIDIA driver. Run `python -m Data.verify_nvml` to inspect NVML access. CPU package temperature and clocks are optional and require LibreHardwareMonitor running with its WMI interface enabled.
+- Administrator rights are only needed for Windows Event Log clear subscriptions (Security event 1102 and System event 104). File watching and telemetry continue without elevation; Aurora logs one warning if Event Log access is unavailable.
 
-## Project Layout
+## Install
 
-```text
-SIT-Py/
-├── Core/
-│   ├── anomaly.py
-│   ├── alerts.py
-│   ├── base_model.py
-│   ├── classifier.py
-│   ├── feature_engineering.py
-│   ├── predictor.py
-│   ├── schema.py
-│   └── schema_v2.py
-├── Dashboard/
-│   └── app.py
-├── Data/
-│   ├── collect.py
-│   ├── collector_v2.py
-│   ├── eventlog_monitor.py
-│   ├── file_monitor.py
-│   ├── preprocess.py
-│   ├── storage.py
-│   ├── verify_nvml.py
-│   ├── watcher_config.json
-│   ├── live_metrics.csv
-│   ├── sit_log.csv
-│   ├── retrain_log.csv
-│   └── datasets/
-│       ├── anomaly_FINAL.csv
-│       ├── classifier_FINAL.csv
-│       ├── predictor_FINAL.csv
-│       ├── anomaly_cybersecurity.csv
-│       ├── anomaly_telesurgery.csv
-│       ├── anomaly_threat_logs.csv
-│       ├── classifier_distributed.csv
-│       ├── predictor_distributed.csv
-│       ├── dataset.csv
-│       └── Laptop_Motherboard_Health_Monitoring_Dataset.csv
-├── pipeline/
-│   └── retrain.py
-├── config.py
-├── requirements.txt
-├── main.py
-└── README.md
-```
-
-## Core Modules
-
-### `config.py`
-
-Central source of truth for:
-
-- dataset paths
-- model and data directories
-- polling cadence
-- retrain thresholds
-- anomaly bridge threshold
-- workload label thresholds
-- model artifact directory (`SITPY_MODELS_DIR`, default `~/.sit-py/models`)
-
-The rest of the project should import from here instead of hardcoding paths or constants.
-
-### `Core/schema.py`
-
-This is the schema hub for the whole project.
-
-It provides:
-
-- the `SystemSnapshot` dataclass used at runtime
-- canonical feature lists for each model
-- legacy column normalization
-- label normalization for anomaly and workload data
-- dataframe helpers used during training and retraining
-
-If a column name changes, this is the first place that should be updated.
-
-### `Core/feature_engineering.py`
-
-Adds temporal context to live telemetry:
-
-- `cpu_delta`
-- `ram_delta`
-- `cpu_rolling_mean`
-- `ram_rolling_mean`
-- `cpu_rolling_std`
-- `ram_rolling_std`
-- `bw_rolling_mean`
-- `bw_spike`
-
-It also provides the statistical bridge used when no trained anomaly model is available yet.
-
-### `Core/predictor.py`
-
-Predicts next-cycle:
-
-- `cpu_pct`
-- `ram_pct`
-- `disk_pct`
-
-Current model:
-
-- `RandomForestRegressor`
-
-Training priority:
-
-1. explicit dataset path
-2. `Data/datasets/predictor_FINAL.csv`
-3. `Data/live_metrics.csv`
-
-The predictor expects live rolling features from `FeatureEngineer`, but its base training dataset is stored in raw resource columns and converted into sliding windows during training.
-
-### `Core/classifier.py`
-
-Predicts workload class:
-
-- `Low`
-- `Medium`
-- `High`
-- `Critical`
-
-Current model:
-
-- `RandomForestClassifier`
-
-Training priority:
-
-1. explicit dataset path
-2. `Data/datasets/classifier_FINAL.csv`
-3. `Data/live_metrics.csv`
-
-At inference time it uses the simplified live feature set:
-
-- `cpu_pct`
-- `ram_pct`
-- `bandwidth_kbps`
-- `packet_rate_pps`
-
-### `Core/anomaly.py`
-
-Detects whether the current snapshot is `Normal` or `Alert`.
-
-Current model:
-
-- supervised `RandomForestClassifier`
-
-Training priority:
-
-1. explicit dataset path
-2. `Data/datasets/anomaly_FINAL.csv`
-
-Inference uses:
-
-- numeric telemetry: CPU, RAM, bandwidth, packet rate
-- categorical context: protocol, attack type, severity, threat type
-
-If no verified anomaly model is available, runtime falls back to the statistical bridge in `FeatureEngineer`.
-
-Trained models and their SHA-256 sidecars are stored outside the repository by default at `~/.sit-py/models`. Set `SITPY_MODELS_DIR` before training or starting the app to use another private model directory. The repository's legacy `Models/` files are no longer loaded; retrain the models to create verified local artifacts:
-
-```bash
-python Core/anomaly.py
-python Core/classifier.py
-python Core/predictor.py
-```
-
-Install the application dependencies with `pip install -r requirements.txt`. Run the test suite with `pip install pytest pytest-cov` followed by `pytest tests/ --cov=Core --cov=Data --cov=pipeline`.
-
-## Runtime Entry Points
-
-### `main.py`
-
-Runs the terminal monitoring loop.
-
-It:
-
-- loads trained models if available
-- falls back safely when a model is missing
-- enriches each live snapshot
-- prints a cycle summary
-- appends normalized rows to `Data/sit_log.csv`
-
-Run it with:
-
-```bash
-python main.py
-```
-
-### `Dashboard/app.py`
-
-Streamlit dashboard for live monitoring.
-
-Features include:
-
-- live CPU / RAM / disk metrics
-- anomaly status
-- workload status
-- next-cycle prediction
-- telemetry charts
-- recent event table
-- one-click retraining trigger
-
-Run it with:
-
-```bash
-python -m streamlit run Dashboard/app.py
-```
-
-### Module B passive file and event-log monitor
-
-Install the pinned dependencies, then start the notification-based monitor in a separate terminal:
-
-```bash
-python -m Data.file_monitor
-```
-
-Edit `Data/watcher_config.json` to adjust watched roots, exclusions, critical files, burst grouping, and cooldowns. Windows Event Log subscriptions need an elevated terminal; without it the monitor logs one warning and continues watching files. Module B only records observations and alerts; it never changes or removes files.
-
-### Collector v2 (GPU and SQLite telemetry)
-
-Install dependencies with `pip install -r requirements.txt`. On Windows, CPU temperature and per-core clock readings also require LibreHardwareMonitor to be running with its WMI interface enabled. Start a tagged 10-minute collection with:
-
-```bash
-python -m Data.collector_v2 --tag gaming --duration 600
-```
-
-Change the active workload tag during collection by writing one supported tag (`idle`, `gaming`, `compile`, `browsing`, or `stress`) to `Data/workload_tag.txt`. SQLite data is stored in `Data/db/aurora_metrics.db` using daily tables and a seven-day retention policy. Run `python -m Data.verify_nvml` on an NVIDIA-equipped host to check driver and sensor access.
-
-### Aurora tray app
-
-Install `requirements.txt`, then launch the four-window tray app with `python -m Dashboard.tray_app`. The tray exposes Live stats, System info, System state, and Detections log. Collector and Module B work run outside the UI thread; warning alerts use tray toasts and critical alerts remain open until dismissed. The workload classifier and resource-abuse detector are interfaces only and show “not trained yet.”
-
-Build the Windows one-file app with `./build_aurora.ps1` or `python -m PyInstaller --clean --noconfirm Aurora.spec`. The executable writes its SQLite data under `%LOCALAPPDATA%\Aurora\Data`; it does not write into the temporary PyInstaller extraction directory. Run elevated only when Windows Event Log clear subscriptions are needed; file watching and telemetry work without elevation.
-
-### Stage 5 checks and evaluation
-
-Run `pytest tests/` for the unit suite. The scenario runner uses an isolated watched tree and SQLite database; it creates a text edit, a harmless `.exe` data stub that it never executes, and a 100-file copy. The log-clear case is synthetic and never clears an operating-system log. Because the default set includes that case, opt in explicitly on a test VM:
+From the repository root in PowerShell:
 
 ```powershell
-python -m scripts.run_scenarios --i-am-on-a-test-vm
-python -m scripts.alert_metrics Data/scenario_runs/<run-id>
-python -m scripts.overhead --pid <Aurora-PID> --minutes 5 --output Data/scenario_runs/overhead.json
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-The metrics report scores alerts against the scenario labels and estimates false alarms per hour from the run duration (or `--observation-hours`). The overhead check compares mean whole-system CPU use against <1% and peak RSS against <150 MB. Frame-time impact is a manual A/B check: capture the same game/workload frame-time trace for a fixed interval with Aurora stopped, then with Aurora running, and compare median and 95th-percentile frame times.
+If the Python launcher command differs on your machine, create the virtual environment with your Python 3.12 executable and use `.venv\Scripts\python.exe` for the remaining commands.
 
-## Data Flow
+## Run Aurora
 
-### Live Files
+### Tray app (recommended)
 
-- `Data/live_metrics.csv`: raw collected telemetry
-- `Data/sit_log.csv`: enriched runtime rows plus model outputs
-- `Data/retrain_log.csv`: retraining history and metrics
-
-When the runtime schema changes, the collector and main pipeline rotate old CSVs into `*_legacy_*.csv` backups so new rows do not corrupt old files.
-
-### Base Datasets
-
-The project now uses separate base datasets for each model:
-
-- `Data/datasets/anomaly_FINAL.csv`
-- `Data/datasets/classifier_FINAL.csv`
-- `Data/datasets/predictor_FINAL.csv`
-
-Supporting source/merged datasets currently in `Data/datasets/` include:
-
-- `anomaly_cybersecurity.csv`
-- `anomaly_telesurgery.csv`
-- `anomaly_threat_logs.csv`
-- `classifier_distributed.csv`
-- `predictor_distributed.csv`
-
-`Data/preprocess.py` exists to normalize and merge raw source CSVs into those final per-agent datasets.
-
-## Retraining
-
-Use:
-
-```bash
-python pipeline/retrain.py
+```powershell
+.\.venv\Scripts\python.exe -m Dashboard.tray_app
 ```
 
-Or force a run regardless of runtime row count:
+The app opens Live stats and stays in the system tray. The hub and tray menu open four windows:
 
-```bash
-python pipeline/retrain.py --force
+1. **Live stats**: CPU, GPU, RAM, available temperatures, Aurora UI CPU/RAM, and collector CPU/RAM.
+2. **System info**: machine, OS, processor, memory, GPU/driver when `nvidia-smi` is available, and Aurora version.
+3. **System state**: the collector's current workload tag and the workload-classifier status.
+4. **Detections log**: all alert severities and their recorded signals. “This is normal” stores feedback in SQLite; dismissing a critical alert records it as dismissed.
+
+Warnings use tray notifications. Critical alerts stay in a dialog until dismissed. Closing the hub hides Aurora to the tray; use the tray's **Quit** action to stop collection and monitoring.
+
+The collector and Module B watcher run in background threads. SQLite reads keep the UI responsive. GPU or temperature fields show N/A when a sensor is unavailable.
+
+### Standalone Module B watcher
+
+Use this when you want file and Event Log monitoring without the tray UI:
+
+```powershell
+.\.venv\Scripts\python.exe -m Data.file_monitor
 ```
 
-The retrainer:
+Do not run this alongside the tray app unless duplicate watcher instances are intended. The tray app already starts Module B.
 
-1. reads `live_metrics.csv` and `sit_log.csv`
-2. normalizes them through `Core/schema.py`
-3. builds a separate training dataset for each agent
-4. blends runtime data with the base dataset when appropriate
-5. retrains all models
-6. writes new artifacts to `Models/`
-7. logs the run to `Data/retrain_log.csv`
+### Standalone Collector v2
 
-Important behavior:
+Use this when you want telemetry collection without the tray UI:
 
-- predictor retraining uses runtime telemetry only when there is enough sequential history
-- classifier retraining can derive labels from `WORKLOAD_THRESHOLDS` when labels are missing
-- anomaly retraining skips runtime blending if the runtime anomaly labels are single-class
-
-## Trained Model Artifacts
-
-Current saved artifacts:
-
-- `Models/predictor_model.pkl`
-- `Models/predictor_scaler.pkl`
-- `Models/classifier_model.pkl`
-- `Models/classifier_scaler.pkl`
-- `Models/classifier_target_encoder.pkl`
-- `Models/anomaly_model.pkl`
-
-The loaders validate artifact compatibility against the current feature schema. If an old model was trained on a previous feature set, SIT-Py will ask for retraining instead of crashing on inference.
-
-## Setup
-
-There is no pinned `requirements.txt` in the repo at the moment, so install the project dependencies in your environment manually.
-
-Typical packages used by this codebase:
-
-```bash
-pip install pandas numpy scikit-learn joblib psutil streamlit plotly
+```powershell
+.\.venv\Scripts\python.exe -m Data.collector_v2 --tag gaming --duration 600
 ```
 
-## Training Commands
+Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`. `--duration` is optional; without it, the collector runs until stopped. `--quiet` suppresses per-sample console output. Do not run a second collector alongside the tray app unless duplicate samples are intended.
 
-Train each model directly:
+To change the tag during a source checkout run, write one supported value to `Data/workload_tag.txt`. In the packaged app, the runtime data directory is `%LOCALAPPDATA%\Aurora\Data`.
 
-```bash
-python Core/predictor.py
-python Core/classifier.py
-python Core/anomaly.py
+## File monitoring and alerts
+
+The watcher uses OS filesystem change notifications through watchdog; it does not poll directory contents. Default roots cover Desktop, Documents, Downloads, Music, Pictures, Videos, OneDrive, startup folders, and the temporary folder. The JSON config is [Data/watcher_config.json](Data/watcher_config.json).
+
+By default, cache folders, temporary non-executables, build outputs, `.git` internals, and common game-library folders are excluded. Executables in temporary folders are still observed. Executables and configured critical files are SHA-256 hashed. File edits, executable changes, and startup-path changes are warnings; high-volume ordinary file creation is grouped into an informational event. Event Log clear detections are critical. Event Log subscriptions watch future clear events only; they do not scan historical events.
+
+The shared SQLite `alerts` table stores alert ID, timestamp, module, severity, title, signals JSON, grouped count, dismissed state, and “marked normal” feedback. Warnings and critical events can notify; info alerts are log-only.
+
+The packaged app embeds the default watcher config. To customize defaults for a packaged build, edit `Data/watcher_config.json` before rebuilding.
+
+## Build the Windows executable
+
+Build on Windows from the repository root with the virtual environment active or its executable on PATH:
+
+```powershell
+.\build_aurora.ps1
 ```
 
-Because the code now defaults to the per-agent final datasets, these commands will train against:
+The one-file app is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory.
 
-- `predictor_FINAL.csv`
-- `classifier_FINAL.csv`
-- `anomaly_FINAL.csv`
+Run Aurora normally for telemetry and file monitoring. Run it elevated only if you need Security/System Event Log clear subscriptions. The app does not request elevation or change system settings.
 
-unless you pass a custom CSV path.
+## Tests and evaluation
 
-## Notes
+Run the unit suite:
 
-- The anomaly detector is no longer the old Isolation Forest path documented in earlier versions of the repo.
-- The predictor is no longer the old linear-regression stack; it is a multi-output random forest with rolling features.
-- The whole codebase now assumes the unified schema names like `cpu_pct`, `ram_pct`, `bandwidth_kbps`, and `packet_rate_pps`.
-- Dataset files inside `Data/datasets/` are now ignored by Git except `Laptop_Motherboard_Health_Monitoring_Dataset.csv`.
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q
+```
 
-## Next Improvements
+The tests cover exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts.
 
-Useful follow-up work from here:
+The scenario runner writes to an isolated temporary watched tree and a fresh SQLite database under `Data/scenario_runs/<run-id>`. It edits a text file, creates a harmless `.exe` data stub that is never executed, copies 100 text files into a test Downloads folder, and simulates Security event 1102 through Module B's queue. It **never clears a real Windows Event Log**. The default run includes this simulated log-clear case, so explicitly enable it only on a test VM:
 
-- add a real `requirements.txt` or `pyproject.toml`
-- improve predictor data quality with more sequential live telemetry
-- tune anomaly thresholds on real machine data
-- add tests for schema normalization and retrain dataset builders
+```powershell
+.\.venv\Scripts\python.exe -m scripts.run_scenarios --i-am-on-a-test-vm
+```
+
+To run only non-log scenarios, select them explicitly and omit the test-VM flag:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.run_scenarios --scenario watched-edit --scenario startup-executable --scenario bulk-copy
+```
+
+Score a completed run with its run directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.alert_metrics Data/scenario_runs/<run-id>
+```
+
+The metrics output includes precision, recall, F1, and false alarms per hour. By default, false alarms per hour uses the scenario run's elapsed time; `--observation-hours` can provide a longer observation period.
+
+Measure a running Aurora process against the budget of average CPU below 1% and peak RSS below 150 MB:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.overhead --pid <Aurora-PID> --minutes 5 --output Data/scenario_runs/overhead.json
+```
+
+Frame-time impact is measured manually: compare median and 95th-percentile frame times for the same fixed game/workload interval with Aurora stopped and running.
+
+## Data and configuration
+
+- Source checkout: SQLite telemetry and alerts are in `Data/db/aurora_metrics.db`. Daily telemetry tables are retained for seven days; alert records are kept separately in the same database.
+- Packaged app: runtime files are in `%LOCALAPPDATA%\Aurora\Data`.
+- Model artifacts for the legacy ML prototype are stored outside the checkout by default at `~/.sit-py/models`. Set `SITPY_MODELS_DIR` to use another directory. Model files require matching SHA-256 sidecars before they are loaded.
+- `AURORA_MACHINE_ID` sets the Collector v2 machine identifier; the default is `laptop`.
+- Runtime output under `Data/db`, `Data/scenario_runs`, CSV logs, and trained models is local and ignored by Git.
+
+## Legacy SIT-Py prototype
+
+These entry points are independent of the Aurora tray app:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe -m streamlit run Dashboard/app.py
+.\.venv\Scripts\python.exe pipeline/retrain.py --force
+```
+
+The prototype has anomaly, workload, and resource-prediction models. Its trained artifact loader verifies sidecar hashes. If artifacts are absent or invalid, the prototype may use its available fallback behavior; train/retrain artifacts before expecting trained predictions. This legacy pipeline uses its own CSV telemetry path and is not the classifier used by Aurora's System state window.
+
+## Repository map
+
+```text
+Core/        Schemas, alerts, legacy models, and Aurora model interfaces
+Data/        Collector v2, SQLite storage, Module B, watcher configuration
+Dashboard/   Legacy Streamlit app and Aurora tray app
+scripts/     Scenario runner, alert metrics, and overhead sampler
+tests/       Unit tests (including mocked Windows API tests)
+Aurora.spec  PyInstaller one-file build definition
+```
