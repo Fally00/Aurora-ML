@@ -1,22 +1,25 @@
-"""
-Shared test fixtures for SIT-Py test suite.
-"""
+"""Shared fixtures for the SIT-Py test suite."""
 
+import hashlib
 import os
 import tempfile
-from unittest.mock import MagicMock
 
 import joblib
+import numpy as np
+import pandas as pd
 import pytest
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 
+from Core.anomaly import FEATURE_COLS as ANOMALY_FEATURES, _build_pipeline
+from Core.classifier import CLASS_NAMES, FEATURE_COLS as CLASSIFIER_FEATURES
+from Core.predictor import FEATURE_COLS as PREDICTOR_FEATURES
 from Core.schema import SystemSnapshot
 
 
 @pytest.fixture
 def mock_system_snapshot():
-    """Return a mock SystemSnapshot for testing."""
+    """Return representative system telemetry for model tests."""
     return SystemSnapshot(
         timestamp="2026-05-07T12:00:00",
         cpu_pct=50.0,
@@ -35,68 +38,50 @@ def mock_system_snapshot():
     )
 
 
+def _save_with_hash(obj, directory, filename):
+    path = os.path.join(directory, filename)
+    joblib.dump(obj, path)
+    with open(path, "rb") as artifact:
+        digest = hashlib.sha256(artifact.read()).hexdigest()
+    with open(path + ".sha256", "w", encoding="ascii") as sidecar:
+        sidecar.write(digest + "\n")
+
+
 @pytest.fixture
 def temp_model_dir():
-    """Create a temporary directory with mock model files."""
+    """Create complete, checksum-verified model bundles for inference tests."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Create a simple mock model for anomaly detector
-        anomaly_model = RandomForestClassifier(n_estimators=10, random_state=42)
-        # We need to fit it to have a valid model, but for simplicity we'll create an unfitted model
-        # and mock the predict method. Alternatively, we can fit it on dummy data.
-        # Let's create a dummy dataset to fit the model.
-        import numpy as np
-        X = np.random.rand(10, 5)  # 5 features
-        y = np.random.randint(0, 2, 10)
-        anomaly_model.fit(X, y)
+        rng = np.random.default_rng(42)
 
-        anomaly_model_path = os.path.join(tmpdir, "anomaly_model.pkl")
-        joblib.dump(anomaly_model, anomaly_model_path)
+        # Anomaly features: numeric + categorical (protocol as string)
+        anomaly_x = pd.DataFrame({
+            "cpu_pct": rng.normal(size=24),
+            "ram_pct": rng.normal(size=24),
+            "bandwidth_kbps": rng.normal(size=24),
+            "packet_rate_pps": rng.normal(size=24),
+            "protocol": rng.choice(["TCP", "UDP", "ICMP"], size=24),
+        })
+        anomaly_y = np.array(["Normal", "Alert"] * 12)
+        anomaly_model = _build_pipeline()
+        anomaly_model.fit(anomaly_x, anomaly_y)
+        _save_with_hash(anomaly_model, tmpdir, "anomaly_model.pkl")
 
-        # Create hash file for anomaly model
-        with open(anomaly_model_path, "rb") as f:
-            model_hash = joblib.hash(anomaly_model) if hasattr(joblib, 'hash') else __import__('hashlib').sha256(f.read()).hexdigest()
-        # Actually, we need to compute the hash of the file, not the model object.
-        # Let's compute the hash of the file we just wrote.
-        with open(anomaly_model_path, "rb") as f:
-            file_hash = __import__('hashlib').sha256(f.read()).hexdigest()
-        with open(anomaly_model_path + ".sha256", "w") as f:
-            f.write(file_hash)
-
-        # Create a simple mock model for classifier
+        classifier_x = rng.normal(size=(40, len(CLASSIFIER_FEATURES)))
+        classifier_y = np.tile(np.arange(len(CLASS_NAMES)), 10)
+        scaler = StandardScaler().fit(classifier_x)
         classifier_model = RandomForestClassifier(n_estimators=10, random_state=42)
-        X_clf = np.random.rand(10, 4)  # 4 features
-        y_clf = np.random.randint(0, 4, 10)  # 4 classes
-        classifier_model.fit(X_clf, y_clf)
+        classifier_model.fit(scaler.transform(classifier_x), classifier_y)
+        encoder = LabelEncoder().fit(CLASS_NAMES)
+        _save_with_hash(classifier_model, tmpdir, "classifier_model.pkl")
+        _save_with_hash(encoder, tmpdir, "classifier_target_encoder.pkl")
+        _save_with_hash(scaler, tmpdir, "classifier_scaler.pkl")
 
-        classifier_model_path = os.path.join(tmpdir, "classifier_model.pkl")
-        joblib.dump(classifier_model, classifier_model_path)
-        with open(classifier_model_path, "rb") as f:
-            file_hash = __import__('hashlib').sha256(f.read()).hexdigest()
-        with open(classifier_model_path + ".sha256", "w") as f:
-            f.write(file_hash)
-
-        # Create a simple mock model for predictor
+        predictor_x = rng.normal(size=(40, len(PREDICTOR_FEATURES)))
+        predictor_y = rng.uniform(0, 100, size=(40, 3))
+        predictor_scaler = StandardScaler().fit(predictor_x)
         predictor_model = RandomForestRegressor(n_estimators=10, random_state=42)
-        X_pred = np.random.rand(10, 8)  # 8 features
-        y_pred = np.random.rand(10, 3)  # 3 targets
-        predictor_model.fit(X_pred, y_pred)
-
-        predictor_model_path = os.path.join(tmpdir, "predictor_model.pkl")
-        joblib.dump(predictor_model, predictor_model_path)
-        with open(predictor_model_path, "rb") as f:
-            file_hash = __import__('hashlib').sha256(f.read()).hexdigest()
-        with open(predictor_model_path + ".sha256", "w") as f:
-            f.write(file_hash)
-
-        # Also create a simple scaler for predictor
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        scaler.fit(X_pred)
-        scaler_path = os.path.join(tmpdir, "predictor_scaler.pkl")
-        joblib.dump(scaler, scaler_path)
-        with open(scaler_path, "rb") as f:
-            file_hash = __import__('hashlib').sha256(f.read()).hexdigest()
-        with open(scaler_path + ".sha256", "w") as f:
-            f.write(file_hash)
+        predictor_model.fit(predictor_scaler.transform(predictor_x), predictor_y)
+        _save_with_hash(predictor_model, tmpdir, "predictor_model.pkl")
+        _save_with_hash(predictor_scaler, tmpdir, "predictor_scaler.pkl")
 
         yield tmpdir

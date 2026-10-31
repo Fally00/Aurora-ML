@@ -26,9 +26,6 @@ def test_anomaly_detector_load_and_predict(temp_model_dir):
         bandwidth_kbps=100.0,
         packet_rate_pps=10.0,
         protocol="TCP",
-        attack_type="",
-        severity="",
-        threat_type="",
     )
     # Predict should return a dict with expected keys
     result = detector.predict(snap.to_anomaly_input())
@@ -100,17 +97,31 @@ def test_model_not_loaded_raises(temp_model_dir):
         bandwidth_kbps=100.0,
         packet_rate_pps=10.0,
         protocol="TCP",
-        attack_type="",
-        severity="",
-        threat_type="",
     )
     with pytest.raises(RuntimeError, match="not loaded"):
         detector.predict(snap.to_anomaly_input())
 
     classifier = WorkloadClassifier(models_dir=temp_model_dir)
-    with pytest.raises(RuntimeError, match="not loaded"):
+    with pytest.raises(RuntimeError, match="Call .load\(\) before .predict\(\)"):
         classifier.predict(snap.to_classifier_input())
 
     predictor = ResourcePredictor(models_dir=temp_model_dir)
-    with pytest.raises(RuntimeError, match="not loaded"):
+    with pytest.raises(RuntimeError, match="Call .load\(\) before .predict\(\)"):
         predictor.predict(snap.to_predictor_input())
+
+
+def test_model_load_rejects_missing_hash(temp_model_dir):
+    detector = AnomalyDetector(models_dir=temp_model_dir)
+    os.remove(os.path.join(temp_model_dir, "anomaly_model.pkl.sha256"))
+
+    assert detector.load() is False
+    assert detector.loaded is False
+
+
+def test_model_load_rejects_tampered_artifact(temp_model_dir):
+    detector = AnomalyDetector(models_dir=temp_model_dir)
+    with open(os.path.join(temp_model_dir, "anomaly_model.pkl"), "ab") as artifact:
+        artifact.write(b"tampered")
+
+    assert detector.load() is False
+    assert detector.loaded is False
