@@ -18,6 +18,7 @@ Configuration sections:
 from __future__ import annotations
 
 import os
+import sys
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +31,14 @@ MODELS_DIR = os.path.abspath(
         os.environ.get("SITPY_MODELS_DIR", os.path.join("~", ".sit-py", "models"))
     )
 )
-DATA_DIR = os.path.join(ROOT_DIR, "Data")
+if getattr(sys, "frozen", False):
+    # PyInstaller one-file extracts code to a temporary directory. Runtime data
+    # must live in a stable, user-writable location instead of that directory.
+    DATA_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Aurora", "Data"
+    )
+else:
+    DATA_DIR = os.path.join(ROOT_DIR, "Data")
 DATASETS_DIR = os.path.join(DATA_DIR, "datasets")
 CORE_DIR = os.path.join(ROOT_DIR, "Core")
 PIPELINE_DIR = os.path.join(ROOT_DIR, "pipeline")

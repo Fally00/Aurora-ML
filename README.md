@@ -248,6 +248,12 @@ python -m Data.collector_v2 --tag gaming --duration 600
 
 Change the active workload tag during collection by writing one supported tag (`idle`, `gaming`, `compile`, `browsing`, or `stress`) to `Data/workload_tag.txt`. SQLite data is stored in `Data/db/aurora_metrics.db` using daily tables and a seven-day retention policy. Run `python -m Data.verify_nvml` on an NVIDIA-equipped host to check driver and sensor access.
 
+### Aurora tray app
+
+Install `requirements.txt`, then launch the four-window tray app with `python -m Dashboard.tray_app`. The tray exposes Live stats, System info, System state, and Detections log. Collector and Module B work run outside the UI thread; warning alerts use tray toasts and critical alerts remain open until dismissed. The workload classifier and resource-abuse detector are interfaces only and show “not trained yet.”
+
+Build the Windows one-file app with `./build_aurora.ps1` or `python -m PyInstaller --clean --noconfirm Aurora.spec`. The executable writes its SQLite data under `%LOCALAPPDATA%\Aurora\Data`; it does not write into the temporary PyInstaller extraction directory. Run elevated only when Windows Event Log clear subscriptions are needed; file watching and telemetry work without elevation.
+
 ## Data Flow
 
 ### Live Files
