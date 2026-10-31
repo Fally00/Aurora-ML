@@ -97,9 +97,6 @@ ANOMALY_NUMERIC_COLS = [
 
 ANOMALY_CATEGORICAL_COLS = [
     "protocol",
-    "attack_type",
-    "severity",
-    "threat_type",
 ]
 
 ANOMALY_FEATURE_COLS = ANOMALY_NUMERIC_COLS + ANOMALY_CATEGORICAL_COLS
@@ -248,9 +245,6 @@ class SystemSnapshot:
     task_priority: str = "Low"
 
     protocol: str = ""
-    attack_type: str = ""
-    severity: str = ""
-    threat_type: str = ""
 
     cpu_delta: float = 0.0
     ram_delta: float = 0.0
@@ -290,9 +284,6 @@ class SystemSnapshot:
             "bandwidth_kbps": self.bandwidth_kbps,
             "packet_rate_pps": self.packet_rate_pps,
             "protocol": self.protocol,
-            "attack_type": self.attack_type,
-            "severity": self.severity,
-            "threat_type": self.threat_type,
         }
 
     def to_classifier_input(self) -> dict[str, float]:
@@ -323,9 +314,6 @@ class SystemSnapshot:
             "process_count": self.process_count,
             "task_priority": self.task_priority,
             "protocol": self.protocol,
-            "attack_type": self.attack_type,
-            "severity": self.severity,
-            "threat_type": self.threat_type,
             "cpu_delta": self.cpu_delta,
             "ram_delta": self.ram_delta,
             "cpu_rolling_mean": self.cpu_rolling_mean,
@@ -365,9 +353,6 @@ class SystemSnapshot:
             "process_count": self.process_count,
             "task_priority": self.task_priority,
             "protocol": self.protocol,
-            "attack_type": self.attack_type,
-            "severity": self.severity,
-            "threat_type": self.threat_type,
             "ram_available_mb": self.ram_available_mb,
             "disk_free_gb": self.disk_free_gb,
         }

@@ -10,6 +10,12 @@ Usage:
 Just drop your raw CSVs in the same folder as this script,
 update the FILE CONFIGS section below with the correct filenames,
 then run. Output goes to /preprocessed folder.
+"""
+
+import logging
+import os
+import pandas as pd
+import numpy as np
 
 NUMERIC_BOUNDS = {
     "cpu_pct": (0, 100),
@@ -18,19 +24,17 @@ NUMERIC_BOUNDS = {
 }
 
 def validate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce bounded resource columns to numeric and clip valid ranges."""
+    df = df.copy()
     for col, (lo, hi) in NUMERIC_BOUNDS.items():
         if col in df.columns:
-            invalid = df[(df[col] < lo) | (df[col] > hi)]
-            if not invalid.empty:
-                logging.warning(f"Clipping {len(invalid)} out-of-range rows in '{col}'")
-            df[col] = df[col].clip(lo, hi)
+            values = pd.to_numeric(df[col], errors="coerce")
+            invalid = values.notna() & ((values < lo) | (values > hi))
+            if invalid.any():
+                count = int(invalid.sum())
+                logging.warning("Clipping %s out-of-range rows in '%s'", count, col)
+            df[col] = values.clip(lo, hi)
     return df
-"""
-
-import logging
-import os
-import pandas as pd
-import numpy as np
 
 # ── Output folder ─────────────────────────────────────────────────
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "preprocessed")
@@ -100,7 +104,6 @@ CONFIGS = {
         "target" : "anomaly",
         "keep"   : {
             "protocol"    : "protocol",
-            "attack_type" : "attack_type",
             "label"       : "label",
         },
         "label_map" : {0: "Normal", 1: "Alert"},
@@ -115,8 +118,6 @@ CONFIGS = {
             "Data Transfer Rate (Mbps)" : "bandwidth_kbps",
             "Network Latency (ms)"      : "packet_rate_pps",
             "Threat Detected"           : "label",
-            "Threat Severity"           : "severity",
-            "Threat Type"               : "threat_type",
         },
         "label_map" : {0: "Normal", 1: "Alert"},
         "label_col" : "label",
@@ -220,9 +221,6 @@ SCHEMAS = {
         "bandwidth_kbps",
         "packet_rate_pps",
         "protocol",
-        "attack_type",
-        "severity",
-        "threat_type",
         "label",
     ],
     "classifier" : ["cpu_pct", "ram_pct", "bandwidth_kbps", "packet_rate_pps", "task_priority"],
@@ -231,9 +229,6 @@ SCHEMAS = {
 
 TEXT_DEFAULTS = {
     "protocol": "",
-    "attack_type": "",
-    "severity": "",
-    "threat_type": "",
 }
 
 
