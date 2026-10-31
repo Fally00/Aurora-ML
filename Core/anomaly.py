@@ -7,6 +7,7 @@ the same runtime output contract used by main.py and the dashboard.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from typing import Optional
@@ -39,6 +40,7 @@ from Core.schema import (
 from config import (
     ANOMALY_ALERT_THRESHOLD,
     ANOMALY_DATASET_CSV,
+    ANOMALY_MODEL_PARAMS,
     MODELS_DIR,
     RANDOM_STATE,
 )
@@ -103,13 +105,7 @@ def _build_pipeline() -> Pipeline:
         ]
     )
 
-    model = RandomForestClassifier(
-        n_estimators=300,
-        min_samples_leaf=2,
-        random_state=RANDOM_STATE,
-        n_jobs=1,
-        class_weight="balanced",
-    )
+    model = RandomForestClassifier(**ANOMALY_MODEL_PARAMS)
 
     return Pipeline(
         steps=[
@@ -168,7 +164,14 @@ def train(dataset_path: str | None = None) -> dict:
 
     accuracy = float((y_pred == y_test).mean())
     os.makedirs(MODELS_DIR, exist_ok=True)
-    joblib.dump(pipeline, os.path.join(MODELS_DIR, "anomaly_model.pkl"))
+    model_path = os.path.join(MODELS_DIR, "anomaly_model.pkl")
+    joblib.dump(pipeline, model_path)
+    # Compute and save hash for integrity verification
+    with open(model_path, "rb") as f:
+        model_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = model_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(model_hash)
     print(f"[AnomalyDetector] Model saved to {MODELS_DIR}")
 
     return {
@@ -178,23 +181,27 @@ def train(dataset_path: str | None = None) -> dict:
     }
 
 
-class AnomalyDetector:
+class AnomalyDetector(BaseModel):
     """Load the trained anomaly model and score live telemetry."""
 
+    model_files = ["anomaly_model.pkl"]
+
     def __init__(self, models_dir: str = MODELS_DIR):
-        self.models_dir = models_dir
+        super().__init__(models_dir)
         self.model: Optional[Pipeline] = None
-        self.loaded = False
 
     def load(self) -> bool:
         """Load the anomaly model if it exists, else stay in bridge mode."""
-        model_path = os.path.join(self.models_dir, "anomaly_model.pkl")
-        if not os.path.exists(model_path):
+        if not super().load():
+            return False
+
+        model_artifact = self.get_artifact("anomaly_model.pkl")
+        if model_artifact is None:
             print("[AnomalyDetector] No anomaly model found, using statistical bridge.")
             self.loaded = False
             return False
 
-        self.model = joblib.load(model_path)
+        self.model = model_artifact
         if not hasattr(self.model, "named_steps") or "model" not in self.model.named_steps:
             print("[AnomalyDetector] Anomaly model is from an older schema; using bridge mode.")
             self.model = None

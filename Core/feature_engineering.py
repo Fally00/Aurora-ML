@@ -38,6 +38,12 @@ class FeatureEngineer:
     def enrich(self, snap: SystemSnapshot) -> SystemSnapshot:
         """
         Mutate and return the current snapshot with temporal features added.
+
+        Args:
+            snap: The current system snapshot to enrich.
+
+        Returns:
+            The enriched system snapshot with temporal features added.
         """
         if not self._history:
             self._apply_cold_start_defaults(snap)
@@ -86,15 +92,19 @@ class FeatureEngineer:
         """
         Lightweight bridge-mode anomaly detection while no trained model exists.
 
-        The returned shape intentionally mirrors the supervised anomaly model so
-        main.py and the dashboard do not need special handling.
+        Args:
+            snap: The current system snapshot.
+            z_threshold: The threshold for the z-score to consider an anomaly.
+
+        Returns:
+            A dictionary with the anomaly detection result, mirroring the supervised anomaly model.
         """
         if len(self._history) < self.bridge_min_history:
             return {
                 "label": "Normal",
                 "anomaly_score": 0.0,
                 "is_anomaly": False,
-                "confidence": 1.0,
+                "anomaly_confidence": 1.0,
                 "source": "stat_bridge_warmup",
             }
 
@@ -119,7 +129,7 @@ class FeatureEngineer:
             "label": "Alert" if is_anomaly else "Normal",
             "anomaly_score": round(float(anomaly_score), 4),
             "is_anomaly": is_anomaly,
-            "confidence": round(float(confidence), 4),
+            "anomaly_confidence": round(float(confidence), 4),
             "source": "stat_bridge",
             "z_scores": z_scores,
         }
@@ -139,6 +149,11 @@ class FeatureEngineer:
         return "Low"
 
     def _apply_cold_start_defaults(self, snap: SystemSnapshot) -> None:
+        """Apply default values for rolling statistics when history is empty.
+
+        Args:
+            snap: The system snapshot to apply defaults to.
+        """
         snap.cpu_rolling_mean = snap.cpu_pct
         snap.ram_rolling_mean = snap.ram_pct
         snap.bw_rolling_mean = snap.bandwidth_kbps

@@ -28,7 +28,20 @@ from Core.classifier import WorkloadClassifier
 from Core.feature_engineering import FeatureEngineer
 from Core.predictor import ResourcePredictor
 from Core.schema import SystemSnapshot
+from dataclasses import dataclass
 from Data.collect import take_snapshot
+
+@dataclass
+class RenderContext:
+    snapshot: SystemSnapshot
+    anomaly_result: dict
+    workload_result: dict
+    prediction_result: dict
+    history: list
+    pred_ok: bool
+    anomaly_ok: bool
+    cls_ok: bool
+    cycle_count: int
 
 
 st.set_page_config(
@@ -253,61 +266,53 @@ def _anomaly_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def render(
-    snap: SystemSnapshot,
-    prediction: dict,
-    anomaly: dict,
-    workload: dict,
-    pred_ok: bool,
-    anomaly_ok: bool,
-    cls_ok: bool,
-) -> None:
-    df = _history_frame()
+def render(ctx: RenderContext) -> None:
+    df = pd.DataFrame(ctx.history) if ctx.history else pd.DataFrame()
 
     st.title("SIT-Py Dashboard")
     st.caption(
-        f"Cycle #{st.session_state.cycle} | {snap.timestamp} | "
+        f"Cycle #{ctx.cycle_count} | {ctx.snapshot.timestamp} | "
         f"{platform.system()} | "
-        f"{'Supervised anomaly model' if anomaly_ok else 'Statistical bridge'}"
+        f"{'Supervised anomaly model' if ctx.anomaly_ok else 'Statistical bridge'}"
     )
 
     top_cols = st.columns(5)
-    top_cols[0].metric("CPU", f"{snap.cpu_pct:.1f}%")
-    top_cols[1].metric("RAM", f"{snap.ram_pct:.1f}%")
-    top_cols[2].metric("Disk", f"{snap.disk_pct:.1f}%")
-    top_cols[3].metric("Bandwidth", f"{snap.bandwidth_kbps:.1f} kbps")
-    top_cols[4].metric("Processes", f"{snap.process_count}")
+    top_cols[0].metric("CPU", f"{ctx.snapshot.cpu_pct:.1f}%")
+    top_cols[1].metric("RAM", f"{ctx.snapshot.ram_pct:.1f}%")
+    top_cols[2].metric("Disk", f"{ctx.snapshot.disk_pct:.1f}%")
+    top_cols[3].metric("Bandwidth", f"{ctx.snapshot.bandwidth_kbps:.1f} kbps")
+    top_cols[4].metric("Processes", f"{ctx.snapshot.process_count}")
 
     ml_left, ml_mid, ml_right = st.columns(3)
     with ml_left:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("**Anomaly**")
-        st.markdown(_badge(anomaly["label"], anomaly["label"]), unsafe_allow_html=True)
+        st.markdown(_badge(ctx.anomaly_result["label"], ctx.anomaly_result["label"]), unsafe_allow_html=True)
         st.caption(
-            f"Score: {anomaly['anomaly_score']:.4f} | Source: {anomaly.get('source', '')}"
+            f"Score: {ctx.anomaly_result['anomaly_score']:.4f} | Source: {ctx.anomaly_result.get('source', '')}"
         )
-        if not anomaly_ok:
+        if not ctx.anomaly_ok:
             st.info("Bridge mode is active until a trained anomaly model is available.")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with ml_mid:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("**Workload**")
-        st.markdown(_badge(workload["workload"], workload["workload"]), unsafe_allow_html=True)
-        st.caption(f"Confidence: {workload['confidence'] * 100:.1f}%")
+        st.markdown(_badge(ctx.workload_result["workload"], ctx.workload_result["workload"]), unsafe_allow_html=True)
+        st.caption(f"Confidence: {ctx.workload_result['confidence'] * 100:.1f}%")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with ml_right:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("**Prediction**")
-        if prediction:
+        if ctx.prediction_result:
             st.write(
-                f"CPU {prediction.get('cpu_pct', 0):.1f}% | "
-                f"RAM {prediction.get('ram_pct', 0):.1f}% | "
-                f"Disk {prediction.get('disk_pct', 0):.1f}%"
+                f"CPU {ctx.prediction_result.get('cpu_pct', 0):.1f}% | "
+                f"RAM {ctx.prediction_result.get('ram_pct', 0):.1f}% | "
+                f"Disk {ctx.prediction_result.get('disk_pct', 0):.1f}%"
             )
         else:
-            st.write(f"Warming up ({st.session_state.engineer.history_len()}/{WINDOW_SIZE})")
+            st.write(f"Warming up ({len(ctx.history)}/{WINDOW_SIZE})")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
@@ -363,11 +368,11 @@ def render(
             else:
                 st.error(result.stderr or result.stdout or "Retrain failed.")
 
-    if not pred_ok:
+    if not ctx.pred_ok:
         st.warning("Predictor model not loaded. Train with `python Core/predictor.py`.")
-    if not cls_ok:
+    if not ctx.cls_ok:
         st.warning("Classifier model not loaded. Train with `python Core/classifier.py`.")
-    if not anomaly_ok:
+    if not ctx.anomaly_ok:
         st.warning("Anomaly model not loaded. Train with `python Core/anomaly.py`.")
 
 
@@ -410,7 +415,17 @@ if running:
         anomaly_ok,
         cls_ok,
     )
-    render(snapshot, prediction, anomaly, workload, pred_ok, anomaly_ok, cls_ok)
+    render(RenderContext(
+        snapshot=snapshot,
+        anomaly_result=anomaly,
+        workload_result=workload,
+        prediction_result=prediction,
+        history=st.session_state.history,
+        pred_ok=pred_ok,
+        anomaly_ok=anomaly_ok,
+        cls_ok=cls_ok,
+        cycle_count=st.session_state.cycle
+    ))
     time.sleep(refresh_rate)
     st.rerun()
 else:
@@ -425,27 +440,29 @@ else:
             packet_rate_pps=float(last["packet_rate"]),
             process_count=int(last["process_count"]),
         )
-        render(
-            snapshot,
-            {
-                "cpu_pct": last.get("pred_cpu"),
-                "ram_pct": last.get("pred_ram"),
-                "disk_pct": last.get("pred_disk"),
-            },
-            {
+        render(RenderContext(
+            snapshot=snapshot,
+            anomaly_result={
                 "label": last["anomaly"],
                 "anomaly_score": float(last["anomaly_score"]),
                 "is_anomaly": bool(last["is_anomaly"]),
                 "source": last.get("anomaly_source", ""),
             },
-            {
+            workload_result={
                 "workload": last["workload"],
                 "confidence": float(last["wl_conf"]),
                 "probabilities": {},
             },
-            pred_ok,
-            anomaly_ok,
-            cls_ok,
-        )
+            prediction_result={
+                "cpu_pct": last.get("pred_cpu"),
+                "ram_pct": last.get("pred_ram"),
+                "disk_pct": last.get("disk_pct"),
+            },
+            history=st.session_state.history,
+            pred_ok=pred_ok,
+            anomaly_ok=anomaly_ok,
+            cls_ok=cls_ok,
+            cycle_count=st.session_state.cycle
+        ))
     else:
         st.info("Enable live monitoring in the sidebar to start collecting data.")

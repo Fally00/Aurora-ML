@@ -7,6 +7,7 @@ consume normalized live/runtime data prepared by the retraining pipeline.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from typing import Optional
@@ -34,6 +35,7 @@ from Core.schema import (
 )
 from config import (
     CLASSIFIER_DATASET_CSV,
+    CLASSIFIER_MODEL_PARAMS,
     LIVE_CSV,
     MODELS_DIR,
     RANDOM_STATE,
@@ -139,12 +141,7 @@ def train(dataset_path: str | None = None) -> dict:
         stratify=_stratify_or_none(y),
     )
 
-    model = RandomForestClassifier(
-        n_estimators=250,
-        random_state=RANDOM_STATE,
-        n_jobs=1,
-        class_weight="balanced_subsample",
-    )
+    model = RandomForestClassifier(**CLASSIFIER_MODEL_PARAMS)
     model.fit(x_train, y_train)
 
     y_pred = model.predict(x_test)
@@ -161,9 +158,30 @@ def train(dataset_path: str | None = None) -> dict:
         print(f"  {feat:22s} {importance:.4f}")
 
     os.makedirs(MODELS_DIR, exist_ok=True)
-    joblib.dump(model, os.path.join(MODELS_DIR, "classifier_model.pkl"))
-    joblib.dump(target_encoder, os.path.join(MODELS_DIR, "classifier_target_encoder.pkl"))
-    joblib.dump(scaler, os.path.join(MODELS_DIR, "classifier_scaler.pkl"))
+    # Save and hash model
+    model_path = os.path.join(MODELS_DIR, "classifier_model.pkl")
+    joblib.dump(model, model_path)
+    with open(model_path, "rb") as f:
+        model_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = model_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(model_hash)
+    # Save and hash target encoder
+    encoder_path = os.path.join(MODELS_DIR, "classifier_target_encoder.pkl")
+    joblib.dump(target_encoder, encoder_path)
+    with open(encoder_path, "rb") as f:
+        encoder_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = encoder_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(encoder_hash)
+    # Save and hash scaler
+    scaler_path = os.path.join(MODELS_DIR, "classifier_scaler.pkl")
+    joblib.dump(scaler, scaler_path)
+    with open(scaler_path, "rb") as f:
+        scaler_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = scaler_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(scaler_hash)
     print("\n[WorkloadClassifier] Model artifacts saved")
 
     accuracy = float((y_pred == y_test).mean())
@@ -174,34 +192,49 @@ def train(dataset_path: str | None = None) -> dict:
     }
 
 
-class WorkloadClassifier:
+class WorkloadClassifier(BaseModel):
     """Load the trained workload classifier and score live telemetry."""
 
+    model_files = [
+        "classifier_model.pkl",
+        "classifier_target_encoder.pkl",
+        "classifier_scaler.pkl",
+    ]
+
     def __init__(self, models_dir: str = MODELS_DIR):
-        self.models_dir = models_dir
+        super().__init__(models_dir)
         self.model: Optional[RandomForestClassifier] = None
         self.target_encoder: Optional[LabelEncoder] = None
         self.scaler: Optional[StandardScaler] = None
-        self.loaded = False
 
-    def load(self) -> None:
-        self.model = joblib.load(os.path.join(self.models_dir, "classifier_model.pkl"))
-        self.target_encoder = joblib.load(
-            os.path.join(self.models_dir, "classifier_target_encoder.pkl")
-        )
-        self.scaler = joblib.load(os.path.join(self.models_dir, "classifier_scaler.pkl"))
+    def load(self) -> bool:
+        """Load the classifier model and artifacts."""
+        if not super().load():
+            return False
+
+        self.model = self.get_artifact("classifier_model.pkl")
+        self.target_encoder = self.get_artifact("classifier_target_encoder.pkl")
+        self.scaler = self.get_artifact("classifier_scaler.pkl")
+
+        if any(artifact is None for artifact in [self.model, self.target_encoder, self.scaler]):
+            print("[WorkloadClassifier] One or more model artifacts not found.")
+            self.loaded = False
+            return False
 
         expected_features = len(FEATURE_COLS)
         model_features = getattr(self.model, "n_features_in_", None)
         scaler_features = getattr(self.scaler, "n_features_in_", None)
         if model_features != expected_features or scaler_features != expected_features:
-            raise FileNotFoundError(
-                "Classifier artifacts are from an older schema. "
+            print(
+                "[WorkloadClassifier] Classifier artifacts are from an older schema. "
                 "Retrain with `python Core/classifier.py` or `python pipeline/retrain.py --force`."
             )
+            self.loaded = False
+            return False
 
         self.loaded = True
         print("[WorkloadClassifier] Model loaded")
+        return True
 
     def predict(self, feature_dict: dict[str, float]) -> dict:
         """Predict Low/Medium/High/Critical workload from live features."""

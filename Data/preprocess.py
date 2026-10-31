@@ -10,8 +10,24 @@ Usage:
 Just drop your raw CSVs in the same folder as this script,
 update the FILE CONFIGS section below with the correct filenames,
 then run. Output goes to /preprocessed folder.
+
+NUMERIC_BOUNDS = {
+    "cpu_pct": (0, 100),
+    "ram_pct": (0, 100),
+    "disk_pct": (0, 100),
+}
+
+def validate_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    for col, (lo, hi) in NUMERIC_BOUNDS.items():
+        if col in df.columns:
+            invalid = df[(df[col] < lo) | (df[col] > hi)]
+            if not invalid.empty:
+                logging.warning(f"Clipping {len(invalid)} out-of-range rows in '{col}'")
+            df[col] = df[col].clip(lo, hi)
+    return df
 """
 
+import logging
 import os
 import pandas as pd
 import numpy as np
@@ -276,6 +292,7 @@ def process(output_name: str, cfg: dict):
             df[col] = TEXT_DEFAULTS.get(col, 0.0)
 
     df = df[schema]  # reorder + drop anything extra
+    df = validate_dataframe(df)
 
     # ── Step 6: drop nulls ──
     before = len(df)

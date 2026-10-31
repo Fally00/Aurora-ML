@@ -8,6 +8,7 @@ pipeline/retrain.py.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from typing import Optional
@@ -33,7 +34,7 @@ from Core.schema import (
     ensure_columns,
     normalize_columns,
 )
-from config import LIVE_CSV, MODELS_DIR, PREDICTOR_DATASET_CSV, RANDOM_STATE, WINDOW_SIZE
+from config import LIVE_CSV, MODELS_DIR, PREDICTOR_DATASET_CSV, PREDICTOR_MODEL_PARAMS, RANDOM_STATE, WINDOW_SIZE
 
 
 FEATURE_COLS = PREDICTOR_FEATURE_COLS
@@ -147,14 +148,7 @@ def train(dataset_path: str | None = None, window: int = WINDOW_SIZE) -> dict:
         random_state=RANDOM_STATE,
     )
 
-    model = RandomForestRegressor(
-        n_estimators=250,
-        max_depth=16,
-        min_samples_leaf=2,
-        max_features="sqrt",
-        random_state=RANDOM_STATE,
-        n_jobs=1,
-    )
+    model = RandomForestRegressor(**PREDICTOR_MODEL_PARAMS)
     model.fit(x_train, y_train)
 
     y_pred = model.predict(x_test)
@@ -172,46 +166,64 @@ def train(dataset_path: str | None = None, window: int = WINDOW_SIZE) -> dict:
         print(f"  {feat:22s} {importance:.4f}")
 
     os.makedirs(MODELS_DIR, exist_ok=True)
-    joblib.dump(model, os.path.join(MODELS_DIR, "predictor_model.pkl"))
-    joblib.dump(scaler, os.path.join(MODELS_DIR, "predictor_scaler.pkl"))
+    # Save and hash model
+    model_path = os.path.join(MODELS_DIR, "predictor_model.pkl")
+    joblib.dump(model, model_path)
+    with open(model_path, "rb") as f:
+        model_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = model_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(model_hash)
+    # Save and hash scaler
+    scaler_path = os.path.join(MODELS_DIR, "predictor_scaler.pkl")
+    joblib.dump(scaler, scaler_path)
+    with open(scaler_path, "rb") as f:
+        scaler_hash = hashlib.sha256(f.read()).hexdigest()
+    hash_path = scaler_path + ".sha256"
+    with open(hash_path, "w") as f:
+        f.write(scaler_hash)
     print(f"\n[Predictor] Model and scaler saved to {MODELS_DIR}")
 
     return metrics
 
 
-class ResourcePredictor:
+class ResourcePredictor(BaseModel):
     """Load the trained model and predict next-cycle resource usage."""
 
+    model_files = ["predictor_model.pkl", "predictor_scaler.pkl"]
+
     def __init__(self, models_dir: str = MODELS_DIR):
-        self.models_dir = models_dir
+        super().__init__(models_dir)
         self.model: Optional[RandomForestRegressor] = None
         self.scaler: Optional[StandardScaler] = None
-        self.loaded = False
 
-    def load(self) -> None:
-        model_path = os.path.join(self.models_dir, "predictor_model.pkl")
-        scaler_path = os.path.join(self.models_dir, "predictor_scaler.pkl")
+    def load(self) -> bool:
+        """Load the predictor model and scaler."""
+        if not super().load():
+            return False
 
-        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-            raise FileNotFoundError(
-                f"Predictor model not found in {self.models_dir}. "
-                "Run `python Core/predictor.py` to train it."
-            )
+        self.model = self.get_artifact("predictor_model.pkl")
+        self.scaler = self.get_artifact("predictor_scaler.pkl")
 
-        self.model = joblib.load(model_path)
-        self.scaler = joblib.load(scaler_path)
+        if any(artifact is None for artifact in [self.model, self.scaler]):
+            print("[Predictor] One or more model artifacts not found.")
+            self.loaded = False
+            return False
 
         expected_features = len(FEATURE_COLS)
         model_features = getattr(self.model, "n_features_in_", None)
         scaler_features = getattr(self.scaler, "n_features_in_", None)
         if model_features != expected_features or scaler_features != expected_features:
-            raise FileNotFoundError(
-                "Predictor artifacts are from an older schema. "
+            print(
+                "[Predictor] Predictor artifacts are from an older schema. "
                 "Retrain with `python Core/predictor.py` or `python pipeline/retrain.py --force`."
             )
+            self.loaded = False
+            return False
 
         self.loaded = True
         print(f"[Predictor] Model loaded with {len(FEATURE_COLS)} live features")
+        return True
 
     def predict(self, feature_dict: dict[str, float]) -> dict[str, float]:
         """Predict the next CPU, RAM, and disk percentages."""

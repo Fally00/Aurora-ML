@@ -140,7 +140,14 @@ PREDICTOR_TARGET_COLS = ["cpu_pct", "ram_pct", "disk_pct"]
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename known legacy columns to the current unified names."""
+    """Rename known legacy columns to the current unified names.
+
+    Args:
+        df: The input DataFrame with possibly legacy column names.
+
+    Returns:
+        A DataFrame with renamed columns.
+    """
     out = df.rename(columns={k: v for k, v in COLUMN_ALIASES.items() if k in df.columns})
 
     if not out.columns.duplicated().any():
@@ -167,7 +174,16 @@ def ensure_columns(
     columns: list[str] | tuple[str, ...],
     defaults: Mapping[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Ensure the dataframe has the requested columns and keep only them."""
+    """Ensure the dataframe has the requested columns and keep only them.
+
+    Args:
+        df: The input DataFrame.
+        columns: The list of column names to ensure.
+        defaults: Optional mapping of column names to default values.
+
+    Returns:
+        A DataFrame with the specified columns, adding missing columns with defaults.
+    """
     defaults = dict(defaults or column_defaults(columns))
     out = normalize_columns(df.copy())
     for col in columns:

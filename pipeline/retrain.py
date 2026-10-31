@@ -62,7 +62,7 @@ def _read_csv_safe(path: str) -> pd.DataFrame:
     try:
         return pd.read_csv(path)
     except Exception:
-        return pd.read_csv(path, engine="python", on_bad_lines="skip")
+        return pd.read_csv(path, engine="python", on_bad_lines="warn")
 
 
 def _load_runtime_sources() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -118,9 +118,11 @@ def _load_base_frame(path: str, columns: list[str]) -> pd.DataFrame:
     return df.dropna(subset=[col for col in numeric_cols if col in df.columns])
 
 
-def _build_predictor_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
-    base_df = _load_base_frame(PREDICTOR_DATASET_CSV, PREDICTOR_RAW_COLS)
+def _load_base_predictor_dataset():
+    return _load_base_frame(PREDICTOR_DATASET_CSV, PREDICTOR_RAW_COLS)
 
+
+def _load_and_prepare_predictor_runtime(live_df: pd.DataFrame, log_df: pd.DataFrame):
     runtime_frames = []
     for df in (live_df, log_df):
         if df.empty:
@@ -130,7 +132,10 @@ def _build_predictor_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.
         frame = coerce_numeric_columns(frame, PREDICTOR_RAW_COLS)
         frame = frame.dropna(subset=PREDICTOR_RAW_COLS)
         runtime_frames.append(frame)
+    return runtime_frames
 
+
+def _combine_predictor_runtime(runtime_frames):
     runtime_df = pd.DataFrame()
     if runtime_frames:
         runtime_df = pd.concat(runtime_frames, ignore_index=True)
@@ -138,7 +143,10 @@ def _build_predictor_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.
             subset=["timestamp"], keep="last"
         )
         runtime_df = runtime_df[PREDICTOR_RAW_COLS].reset_index(drop=True)
+    return runtime_df
 
+
+def _merge_predictor_runtime_and_base(runtime_df: pd.DataFrame, base_df: pd.DataFrame):
     if not runtime_df.empty and len(runtime_df) > WINDOW_SIZE + 1:
         if not base_df.empty:
             merged = pd.concat([runtime_df, base_df], ignore_index=True)
@@ -146,20 +154,31 @@ def _build_predictor_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.
             merged = runtime_df
     else:
         merged = base_df
+    return merged
 
+
+def _build_predictor_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = _load_base_predictor_dataset()
+    runtime_frames = _load_and_prepare_predictor_runtime(live_df, log_df)
+    runtime_df = _combine_predictor_runtime(runtime_frames)
+    merged = _merge_predictor_runtime_and_base(runtime_df, base_df)
     print(f"  [predictor] runtime rows : {len(runtime_df):,}")
     print(f"  [predictor] base rows    : {len(base_df):,}")
     print(f"  [predictor] final rows   : {len(merged):,}")
     return merged
 
 
-def _build_classifier_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
+def _load_base_classifier_dataset():
     base_cols = CLASSIFIER_FEATURE_COLS + [CLASSIFIER_TARGET_COL]
     base_df = _load_base_frame(CLASSIFIER_DATASET_CSV, base_cols)
     if not base_df.empty:
         base_df[CLASSIFIER_TARGET_COL] = base_df[CLASSIFIER_TARGET_COL].map(normalize_workload_label)
         base_df = base_df.dropna(subset=[CLASSIFIER_TARGET_COL])
+    return base_df
 
+
+def _load_and_prepare_classifier_runtime(live_df: pd.DataFrame, log_df: pd.DataFrame):
+    base_cols = CLASSIFIER_FEATURE_COLS + [CLASSIFIER_TARGET_COL]
     runtime_frames = []
     for df in (live_df, log_df):
         if df.empty:
@@ -183,35 +202,51 @@ def _build_classifier_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd
             ]
         frame = frame.dropna(subset=CLASSIFIER_FEATURE_COLS + [CLASSIFIER_TARGET_COL])
         runtime_frames.append(frame)
+    return runtime_frames
 
+
+def _combine_classifier_runtime(runtime_frames):
     runtime_df = pd.DataFrame()
     if runtime_frames:
         runtime_df = pd.concat(runtime_frames, ignore_index=True)
-        runtime_df = runtime_df[base_cols].reset_index(drop=True)
+        runtime_df = runtime_df[CLASSIFIER_FEATURE_COLS + [CLASSIFIER_TARGET_COL]].reset_index(drop=True)
+    return runtime_df
 
+
+def _merge_classifier_runtime_and_base(base_df: pd.DataFrame, runtime_df: pd.DataFrame):
     parts = []
     if not base_df.empty:
         parts.append(base_df)
     if not runtime_df.empty:
         parts.extend([runtime_df] * LIVE_DATA_WEIGHT)
-
-    merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=base_cols)
+    merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=CLASSIFIER_FEATURE_COLS + [CLASSIFIER_TARGET_COL])
     if not merged.empty:
         merged = merged.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+    return merged
 
+
+def _build_classifier_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = _load_base_classifier_dataset()
+    runtime_frames = _load_and_prepare_classifier_runtime(live_df, log_df)
+    runtime_df = _combine_classifier_runtime(runtime_frames)
+    merged = _merge_classifier_runtime_and_base(base_df, runtime_df)
     print(f"  [classifier] runtime rows : {len(runtime_df):,}")
     print(f"  [classifier] base rows    : {len(base_df):,}")
     print(f"  [classifier] final rows   : {len(merged):,}")
     return merged
 
 
-def _build_anomaly_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
+def _load_base_anomaly_dataset():
     base_cols = ANOMALY_FEATURE_COLS + [ANOMALY_TARGET_COL]
     base_df = _load_base_frame(ANOMALY_DATASET_CSV, base_cols)
     if not base_df.empty:
         base_df[ANOMALY_TARGET_COL] = base_df[ANOMALY_TARGET_COL].map(normalize_anomaly_label)
         base_df = base_df.dropna(subset=[ANOMALY_TARGET_COL])
+    return base_df
 
+
+def _load_and_prepare_anomaly_runtime(log_df: pd.DataFrame):
+    base_cols = ANOMALY_FEATURE_COLS + [ANOMALY_TARGET_COL]
     runtime_df = pd.DataFrame(columns=base_cols)
     if not log_df.empty:
         frame = log_df.copy()
@@ -228,17 +263,25 @@ def _build_anomaly_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.Da
         if runtime_df[ANOMALY_TARGET_COL].nunique() < 2:
             print("  [anomaly] runtime labels are single-class; skipping runtime blend")
             runtime_df = pd.DataFrame(columns=base_cols)
+    return runtime_df
 
+
+def _merge_anomaly_runtime_and_base(base_df: pd.DataFrame, runtime_df: pd.DataFrame):
     parts = []
     if not base_df.empty:
         parts.append(base_df)
     if not runtime_df.empty:
         parts.extend([runtime_df] * LABELED_LOG_WEIGHT)
-
-    merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=base_cols)
+    merged = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=ANOMALY_FEATURE_COLS + [ANOMALY_TARGET_COL])
     if not merged.empty:
         merged = merged.sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+    return merged
 
+
+def _build_anomaly_dataset(live_df: pd.DataFrame, log_df: pd.DataFrame) -> pd.DataFrame:
+    base_df = _load_base_anomaly_dataset()
+    runtime_df = _load_and_prepare_anomaly_runtime(log_df)
+    merged = _merge_anomaly_runtime_and_base(base_df, runtime_df)
     print(f"  [anomaly] labeled runtime rows : {len(runtime_df):,}")
     print(f"  [anomaly] base rows            : {len(base_df):,}")
     print(f"  [anomaly] final rows           : {len(merged):,}")

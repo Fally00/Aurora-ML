@@ -189,15 +189,16 @@ def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
     print(f"[Collector] Platform: {platform.system()} | Sensors: {'ON' if IS_LINUX else 'OFF'}")
     print("-" * 60)
 
-    rows:      list  = []
-    prev_net         = psutil.net_io_counters()
-    start_time       = time.time()
-    last_poll        = start_time
+    collector = Collector()
+    rows: list = []
+    prev_net = psutil.net_io_counters()
+    start_time = time.time()
+    last_poll = start_time
     snapshot_num: int = 0
 
     try:
         while True:
-            now     = time.time()
+            now = time.time()
             elapsed = now - last_poll
             last_poll = now
 
@@ -217,7 +218,7 @@ def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
 
             # Flush every 10 rows
             if snapshot_num % 10 == 0:
-                _flush_to_csv(rows)
+                collector._flush_to_csv(rows)
                 rows = []
                 print(f"  -> flushed {snapshot_num} rows to {LIVE_CSV}")
 
@@ -235,36 +236,41 @@ def run_collector(duration_seconds: Optional[int] = None, verbose: bool = True):
         print("\n[Collector] Stopped by user.")
     finally:
         if rows:
-            _flush_to_csv(rows)
+            collector._flush_to_csv(rows)
         print(f"[Collector] Done. Total snapshots: {snapshot_num}")
 
 
-def _flush_to_csv(rows: list):
-    """Appends rows to LIVE_CSV; writes header only on first write."""
-    df = pd.DataFrame(rows)
-    _ensure_csv_schema(LIVE_CSV, list(df.columns))
-    df.to_csv(LIVE_CSV, mode="a", header=not os.path.exists(LIVE_CSV), index=False)
+class Collector:
+    def __init__(self):
+        self._schema_initialized = False
 
+    def _ensure_csv_schema(self, columns: list[str]) -> None:
+        """Rotate an older CSV aside if its header does not match the current schema."""
+        if not os.path.exists(LIVE_CSV) or os.path.getsize(LIVE_CSV) == 0:
+            return
 
-def _ensure_csv_schema(path: str, columns: list[str]) -> None:
-    """Rotate an older CSV aside if its header does not match the current schema."""
-    if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return
+        try:
+            with open(LIVE_CSV, "r", encoding="utf-8") as handle:
+                header = handle.readline().strip()
+        except OSError:
+            return
 
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            header = handle.readline().strip()
-    except OSError:
-        return
+        existing_cols = header.split(",") if header else []
+        if existing_cols == columns:
+            return
 
-    existing_cols = header.split(",") if header else []
-    if existing_cols == columns:
-        return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = LIVE_CSV.replace(".csv", f"_legacy_{stamp}.csv")
+        os.replace(LIVE_CSV, backup_path)
+        print(f"[Collector] Existing CSV schema changed, moved old file to {backup_path}")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = path.replace(".csv", f"_legacy_{stamp}.csv")
-    os.replace(path, backup_path)
-    print(f"[Collector] Existing CSV schema changed, moved old file to {backup_path}")
+    def _flush_to_csv(self, rows: list):
+        """Appends rows to LIVE_CSV; writes header only on first write."""
+        df = pd.DataFrame(rows)
+        if not self._schema_initialized:
+            self._ensure_csv_schema(list(df.columns))
+            self._schema_initialized = True
+        df.to_csv(LIVE_CSV, mode="a", header=not os.path.exists(LIVE_CSV), index=False)
 
 
 # ── Entry ───────────────────────────────────────────────────────────────────
