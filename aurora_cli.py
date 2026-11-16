@@ -15,12 +15,16 @@ from dataclasses import asdict
 
 from config import DB_PATH, MACHINE_ID, VALID_WORKLOAD_TAGS
 from Core.schema_v2 import SystemSnapshotV2
-from Data.collector_v2 import run_collector, set_workload_tag
+from Data import collector_v2
+from Data.collector_v2 import set_workload_tag
 from Data.file_monitor import FileMonitor
 from Data.storage import get_db
 
 
 LOGGER = logging.getLogger("aurora")
+# The protected legacy collector's startup message reads DB_PATH as a module
+# global even though it is not imported there. Supply the configured path here.
+collector_v2.DB_PATH = DB_PATH
 
 
 def _print_alert(alert, *, stream=None) -> None:
@@ -35,9 +39,9 @@ def _run_collector(
     try:
         if quiet:
             with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink):
-                run_collector(verbose=False, stop_event=stop_event)
+                collector_v2.run_collector(verbose=False, stop_event=stop_event)
         else:
-            run_collector(verbose=True, stop_event=stop_event)
+            collector_v2.run_collector(verbose=True, stop_event=stop_event)
     except Exception:
         LOGGER.exception("Collector stopped after an error")
         failure_event.set()
