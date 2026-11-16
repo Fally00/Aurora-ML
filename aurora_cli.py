@@ -11,7 +11,6 @@ import re
 import sqlite3
 import sys
 import threading
-import time
 from dataclasses import asdict
 
 from config import DB_PATH, MACHINE_ID, VALID_WORKLOAD_TAGS
@@ -28,7 +27,11 @@ def _print_alert(alert, *, stream=None) -> None:
     print(f"{alert.severity} {alert.timestamp} {alert.title}", file=stream, flush=True)
 
 
-def _run_collector(stop_event: threading.Event, quiet: bool) -> None:
+def _run_collector(
+    stop_event: threading.Event,
+    quiet: bool,
+    failure_event: threading.Event,
+) -> None:
     try:
         if quiet:
             with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink):
@@ -37,6 +40,8 @@ def _run_collector(stop_event: threading.Event, quiet: bool) -> None:
             run_collector(verbose=True, stop_event=stop_event)
     except Exception:
         LOGGER.exception("Collector stopped after an error")
+        failure_event.set()
+        stop_event.set()
 
 
 def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
@@ -57,10 +62,11 @@ def run(tag: str | None = None, quiet: bool = False) -> int:
     console = sys.stdout
     seen_ids = {alert.id for alert in storage.get_alerts(limit=500)}
     stop_event = threading.Event()
+    collector_failed = threading.Event()
     monitor = FileMonitor(storage=storage)
     collector_thread = threading.Thread(
         target=_run_collector,
-        args=(stop_event, quiet),
+        args=(stop_event, quiet, collector_failed),
         name="aurora-collector",
         daemon=True,
     )
@@ -74,12 +80,12 @@ def run(tag: str | None = None, quiet: bool = False) -> int:
     monitor_thread.start()
 
     try:
-        while True:
+        while not collector_failed.is_set():
             for alert in reversed(storage.get_alerts(limit=500)):
                 if alert.id not in seen_ids:
                     _print_alert(alert, stream=console)
                     seen_ids.add(alert.id)
-            time.sleep(0.5)
+            stop_event.wait(0.5)
     except KeyboardInterrupt:
         pass
     finally:
@@ -91,7 +97,7 @@ def run(tag: str | None = None, quiet: bool = False) -> int:
         monitor_thread.join(timeout=3.0)
         collector_thread.join(timeout=3.0)
         storage.close()
-    return 0
+    return 1 if collector_failed.is_set() else 0
 
 
 def show_alerts(limit: int) -> int:
