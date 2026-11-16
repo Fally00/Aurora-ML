@@ -184,6 +184,17 @@ class FileMonitor:
     def dropped_events(self) -> int:
         return self._dropped_events
 
+    @property
+    def watched_root_count(self) -> int:
+        """Number of configured watch roots (filesystem locations observed)."""
+        return len(self.config.all_roots)
+
+    @property
+    def event_log_active(self) -> bool:
+        """Whether Windows Event Log subscriptions are running (needs admin)."""
+        listener = self._event_log_listener
+        return listener is not None and bool(getattr(listener, "_threads", None))
+
     def enqueue(self, event: FileChange | LogClearEvent) -> bool:
         """Queue an event without blocking the OS callback thread."""
         try:
