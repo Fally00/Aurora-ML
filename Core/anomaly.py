@@ -2,7 +2,7 @@
 Anomaly detector.
 
 The anomaly model now trains against the dedicated anomaly dataset and keeps
-the same runtime output contract used by main.py and the dashboard.
+the same runtime output contract used by main.py and CLI consumers.
 """
 
 from __future__ import annotations

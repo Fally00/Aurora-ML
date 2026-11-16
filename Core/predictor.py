@@ -319,7 +319,7 @@ class ResourcePredictor(BaseModel):
         }
 
     def feature_importances(self) -> dict[str, float]:
-        """Return model feature importances for the dashboard."""
+        """Return model feature importances for inspection tools."""
         if not self.loaded or self.model is None:
             return {}
         return dict(

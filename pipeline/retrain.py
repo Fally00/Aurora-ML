@@ -426,7 +426,7 @@ def run(force: bool = False) -> None:
     )
 
     print(f"\n[Retrain] Complete in {elapsed:.1f}s")
-    print("[Retrain] Restart main.py or the dashboard to load the new models.")
+    print("[Retrain] Restart main.py to load the new models.")
 
 
 if __name__ == "__main__":

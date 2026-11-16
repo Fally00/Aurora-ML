@@ -1,7 +1,5 @@
 # Build on Windows with: pyinstaller --clean --noconfirm Aurora.spec
-from PyInstaller.utils.hooks import collect_submodules
-
-hiddenimports = collect_submodules("pyqtgraph") + [
+hiddenimports = [
     "pynvml",
     "wmi",
     "win32timezone",
@@ -11,7 +9,7 @@ hiddenimports = collect_submodules("pyqtgraph") + [
 ]
 
 a = Analysis(
-    ["Dashboard/tray_app.py"],
+    ["aurora_cli.py"],
     pathex=[SPECPATH],
     binaries=[],
     datas=[("Data/watcher_config.json", "Data")],
@@ -35,7 +33,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
