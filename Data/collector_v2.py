@@ -481,10 +481,11 @@ def run_collector(
     stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Main polling loop. Writes to SQLite until duration or stop event."""
-    print(f"[Collector v2] Starting - polling every {POLL_INTERVAL_V2}s")
-    print(f"[Collector v2] Machine: {MACHINE_ID} | DB: {DB_PATH}")
-    print(f"[Collector v2] Workload tag: {get_workload_tag()} (edit {WORKLOAD_TAG_FILE} to change)")
-    print("-" * 60)
+    if verbose:
+        print(f"[Collector v2] Starting - polling every {POLL_INTERVAL_V2}s")
+        print(f"[Collector v2] Machine: {MACHINE_ID} | DB: {DB_PATH}")
+        print(f"[Collector v2] Workload tag: {get_workload_tag()} (edit {WORKLOAD_TAG_FILE} to change)")
+        print("-" * 60)
 
     db = get_db()
     db.prune_old_data()
@@ -525,7 +526,8 @@ def run_collector(
                     print(f"  -> flushed {snapshot_num} rows to SQLite")
 
             if duration_seconds and (time.time() - start_time) >= duration_seconds:
-                print(f"[Collector] Duration reached ({duration_seconds}s), stopping.")
+                if verbose:
+                    print(f"[Collector] Duration reached ({duration_seconds}s), stopping.")
                 break
             if stop_event is not None and stop_event.is_set():
                 break
@@ -537,11 +539,13 @@ def run_collector(
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        print("\n[Collector] Stopped by user.")
+        if verbose:
+            print("\n[Collector] Stopped by user.")
     finally:
         if buffer:
             db.insert_batch(buffer)
-        print(f"[Collector] Done. Total snapshots: {snapshot_num}")
+        if verbose:
+            print(f"[Collector] Done. Total snapshots: {snapshot_num}")
 
 
 # ── Entry Point ─────────────────────────────────────────────────────────────

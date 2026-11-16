@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import logging
-import os
 import re
 import sqlite3
 import sys
@@ -33,11 +31,7 @@ def _run_collector(
     failure_event: threading.Event,
 ) -> None:
     try:
-        if quiet:
-            with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink):
-                run_collector(verbose=False, stop_event=stop_event)
-        else:
-            run_collector(verbose=True, stop_event=stop_event)
+        run_collector(verbose=not quiet, stop_event=stop_event)
     except Exception:
         LOGGER.exception("Collector stopped after an error")
         failure_event.set()
