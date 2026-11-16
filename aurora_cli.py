@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -25,6 +26,27 @@ from aurora_ui import AuroraApp
 LOGGER = logging.getLogger("aurora")
 
 
+class _LoggingStream:
+    """Turn redirected collector writes into records on the configured logger."""
+
+    def __init__(self, level: int):
+        self.level = level
+        self.pending = ""
+
+    def write(self, value: str) -> int:
+        self.pending += value
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            if line.strip():
+                LOGGER.log(self.level, "%s", line)
+        return len(value)
+
+    def flush(self) -> None:
+        if self.pending.strip():
+            LOGGER.log(self.level, "%s", self.pending)
+        self.pending = ""
+
+
 def _print_alert(alert, *, stream=None) -> None:
     print(f"{alert.severity} {alert.timestamp} {alert.title}", file=stream, flush=True)
 
@@ -35,11 +57,28 @@ def _run_collector(
     failure_event: threading.Event,
 ) -> None:
     try:
-        run_collector(verbose=not quiet, stop_event=stop_event)
+        if quiet:
+            stdout = _LoggingStream(logging.INFO)
+            stderr = _LoggingStream(logging.WARNING)
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                run_collector(verbose=False, stop_event=stop_event)
+            stdout.flush()
+            stderr.flush()
+        else:
+            run_collector(verbose=True, stop_event=stop_event)
     except Exception:
         LOGGER.exception("Collector stopped after an error")
         failure_event.set()
         stop_event.set()
+    finally:
+        try:
+            storage = get_db()
+            storage.flush()
+            storage.close()
+        except Exception:
+            LOGGER.exception("Could not flush collector storage")
+            failure_event.set()
+            stop_event.set()
 
 
 def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
@@ -48,6 +87,14 @@ def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
             monitor.start()
     except Exception as exc:
         LOGGER.warning("Module B could not start; telemetry collection will continue: %s", exc)
+    finally:
+        storage = getattr(monitor, "storage", None)
+        if storage is not None:
+            try:
+                storage.flush()
+                storage.close()
+            except Exception:
+                LOGGER.exception("Could not flush Module B startup storage")
 
 
 def run(

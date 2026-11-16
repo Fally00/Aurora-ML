@@ -216,27 +216,27 @@ class TestLHM:
     @patch("Data.collector_v2._lhm_handle", None)
     @patch("Data.collector_v2._lhm_initialized", False)
     @patch("Data.collector_v2._lhm_warning_logged", False)
-    def test_init_lhm_import_error(self, mock_platform, capfd):
+    def test_init_lhm_import_error(self, mock_platform, caplog):
         """Test LHM init handles import error gracefully."""
         with patch.dict(sys.modules, {"wmi": None}):
-            result = _init_lhm()
-            assert result is False
-        out = capfd.readouterr()
-        assert "LibreHardwareMonitor unavailable" in out.err
+            with caplog.at_level("WARNING", logger="Data.collector_v2"):
+                result = _init_lhm()
+        assert result is False
+        assert "CPU temp: N/A (LibreHardwareMonitor not running)" in caplog.text
 
     @patch("Data.collector_v2.platform.system", return_value="Windows")
     @patch("Data.collector_v2._lhm_handle", None)
     @patch("Data.collector_v2._lhm_initialized", False)
     @patch("Data.collector_v2._lhm_warning_logged", False)
-    def test_init_lhm_wmi_error(self, mock_platform, capfd):
+    def test_init_lhm_wmi_error(self, mock_platform, caplog):
         """Test LHM init handles WMI connection error gracefully."""
         mock_wmi = MagicMock()
         mock_wmi.WMI.side_effect = Exception("Access denied")
         with patch.dict(sys.modules, {"wmi": mock_wmi}):
-            result = _init_lhm()
-            assert result is False
-        out = capfd.readouterr()
-        assert "LibreHardwareMonitor unavailable" in out.err
+            with caplog.at_level("WARNING", logger="Data.collector_v2"):
+                result = _init_lhm()
+        assert result is False
+        assert "CPU temp: N/A (LibreHardwareMonitor not running)" in caplog.text
 
     def test_get_cpu_package_temp_and_clocks_mock(self):
         """Test CPU package temp and clocks collection with mocked LHM."""
@@ -316,18 +316,22 @@ class TestPsutilHelpers:
         mock_proc2 = MagicMock()
         mock_proc2.info = {"pid": 200, "name": "code.exe", "cpu_percent": 15.0}
         mock_proc3 = MagicMock()
-        mock_proc3.info = {"pid": 300, "name": "idle.exe", "cpu_percent": 0.0}
+        mock_proc3.info = {"pid": 0, "name": "idle.exe", "cpu_percent": 80.0}
         mock_proc4 = MagicMock()
-        mock_proc4.info = {"pid": 400, "name": "system.exe", "cpu_percent": 5.0}
+        mock_proc4.info = {"pid": 300, "name": "system.exe", "cpu_percent": 5.0}
+        mock_proc5 = MagicMock()
+        mock_proc5.info = {"pid": 400, "name": "System Idle Process", "cpu_percent": 99.0}
 
-        mock_process_iter.return_value = [mock_proc1, mock_proc2, mock_proc3, mock_proc4]
+        mock_process_iter.return_value = [mock_proc1, mock_proc2, mock_proc3, mock_proc4, mock_proc5]
 
-        procs = _get_top_cpu_processes(3)
+        with patch("Data.collector_v2.psutil.cpu_count", return_value=4):
+            procs = _get_top_cpu_processes(3)
         assert len(procs) == 3
         assert procs[0].pid == 100
-        assert procs[0].cpu_percent == 25.0
+        assert procs[0].cpu_percent == 6.25
+        assert all(proc.pid != 0 and proc.name != "System Idle Process" for proc in procs)
         assert procs[1].pid == 200
-        assert procs[2].pid == 400
+        assert procs[2].pid == 300
 
     @patch("Data.collector_v2.psutil.process_iter")
     def test_get_top_cpu_processes_access_denied(self, mock_process_iter):
@@ -347,7 +351,8 @@ class TestPsutilHelpers:
         import psutil
         mock_process_iter.return_value = [mock_proc1, mock_proc2, mock_proc3]
 
-        procs = _get_top_cpu_processes(5)
+        with patch("Data.collector_v2.psutil.cpu_count", return_value=4):
+            procs = _get_top_cpu_processes(5)
         # Should get the two accessible ones
         assert len(procs) == 2
 
@@ -372,7 +377,10 @@ class TestPsutilHelpers:
         mock_nvml.nvmlDeviceGetGraphicsRunningProcesses.return_value = [mock_graphics]
 
         # Mock psutil.Process for each
-        with patch("Data.collector_v2.psutil.Process") as mock_psutil_process:
+        with (
+            patch("Data.collector_v2.psutil.Process") as mock_psutil_process,
+            patch("Data.collector_v2.psutil.cpu_count", return_value=4),
+        ):
             mock_proc1 = MagicMock()
             mock_proc1.name.return_value = "python.exe"
             mock_proc1.cpu_percent.return_value = 10.0
@@ -387,8 +395,10 @@ class TestPsutilHelpers:
         # Should be sorted by GPU memory (4 MB first)
         assert procs[0].pid == 200
         assert procs[0].gpu_memory_mb == 4.0
+        assert procs[0].cpu_percent == 7.5
         assert procs[1].pid == 100
         assert procs[1].gpu_memory_mb == 2.0
+        assert procs[1].cpu_percent == 2.5
 
     @patch("Data.collector_v2._init_nvml", return_value=False)
     def test_get_top_gpu_processes_nvml_unavailable(self, mock_init):

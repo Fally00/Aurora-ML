@@ -250,34 +250,41 @@ class FileMonitor:
             self._worker = None
 
     def _worker_loop(self) -> None:
-        while not self._stop.is_set() or not self._events.empty():
-            try:
-                first = self._events.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if isinstance(first, LogClearEvent):
-                self._process_log_clear(first)
-                continue
-
-            batch: list[FileChange] = [first]
-            deadline = time.monotonic() + self.config.burst_window_seconds
-            while len(batch) < self.config.max_batch_events:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+        try:
+            while not self._stop.is_set() or not self._events.empty():
                 try:
-                    next_event = self._events.get(timeout=remaining)
+                    first = self._events.get(timeout=0.1)
                 except queue.Empty:
-                    break
-                if isinstance(next_event, LogClearEvent):
-                    self._process_batch(batch)
-                    batch = []
-                    self._process_log_clear(next_event)
-                    deadline = time.monotonic() + self.config.burst_window_seconds
                     continue
-                batch.append(next_event)
-            if batch:
-                self._process_batch(batch)
+                if isinstance(first, LogClearEvent):
+                    self._process_log_clear(first)
+                    continue
+
+                batch: list[FileChange] = [first]
+                deadline = time.monotonic() + self.config.burst_window_seconds
+                while len(batch) < self.config.max_batch_events:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        next_event = self._events.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if isinstance(next_event, LogClearEvent):
+                        self._process_batch(batch)
+                        batch = []
+                        self._process_log_clear(next_event)
+                        deadline = time.monotonic() + self.config.burst_window_seconds
+                        continue
+                    batch.append(next_event)
+                if batch:
+                    self._process_batch(batch)
+        finally:
+            try:
+                self.storage.flush()
+                self.storage.close()
+            except Exception:
+                LOGGER.exception("Could not flush Module B worker storage")
 
     def process_batch(self, events: list[FileChange]) -> None:
         """Public synchronous entry point for deterministic tests and replay."""
