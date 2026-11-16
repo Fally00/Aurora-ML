@@ -54,8 +54,13 @@ class TestNVML:
     @patch("Data.collector_v2._nvml_initialized", False)
     @patch("Data.collector_v2._nvml_warning_logged", False)
     def test_get_gpu_metrics_nvml_unavailable(self):
-        """When NVML is not available, returns empty metrics with None values."""
-        metrics = _get_gpu_metrics()
+        """When NVML is not available, returns empty metrics with None values.
+
+        Force the pynvml import to fail so the test is hermetic: it passes
+        whether or not a real NVIDIA GPU/driver is present on the host.
+        """
+        with patch.dict(sys.modules, {"pynvml": None}):
+            metrics = _get_gpu_metrics()
         empty = _empty_gpu_metrics()
         assert metrics == empty
 

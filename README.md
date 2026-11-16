@@ -12,7 +12,7 @@ The repository also contains the earlier SIT-Py machine-learning prototype. Its 
 | 2. Collector v2 and SQLite telemetry | Implemented with mocked tests. Real 10-minute sensor acceptance on target hardware is pending. |
 | 3. Module B file and Event Log monitor | Implemented with rule, storage, and mocked Event Log tests. |
 | 4. CLI and packaging | CLI commands and one-file PyInstaller build are implemented. The Windows executable built and launched from a console on 2026-11-16. |
-| 5. Tests and evaluation tools | Latest run: 118 passed, 1 failed out of 119. The remaining failure is the NVML-unavailable test on a host where NVML successfully returns real GPU readings. Scenario results and live overhead measurements are still pending. |
+| 5. Tests and evaluation tools | Latest run: 119 passed out of 119. The NVML-unavailable test is now hermetic (mocks the pynvml import) so it passes on hosts with a real GPU. Scenario results and live overhead measurements are still pending. |
 
 The Aurora workload classifier and resource-abuse detector are interfaces only; no ML detector is enabled in Aurora.
 
@@ -87,7 +87,7 @@ Run the unit suite:
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts. On 2026-11-16, 118 of 119 tests passed; the NVML-unavailable test failed because NVML was available on the test machine and returned GPU readings.
+The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts. On 2026-11-16, all 119 tests passed; the NVML-unavailable test is now hermetic so it passes on hosts with a real GPU.
 
 The scenario runner writes to an isolated temporary watched tree and a fresh SQLite database under `Data/scenario_runs/<run-id>`. It edits a text file, creates a harmless `.exe` data stub that is never executed, copies 100 text files into a test Downloads folder, and simulates Security event 1102 through Module B's queue. It never clears a real Windows Event Log. The default run includes this simulated log-clear case, so explicitly enable it only on a test VM:
 
