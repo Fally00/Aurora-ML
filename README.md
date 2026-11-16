@@ -11,8 +11,8 @@ The repository also contains the earlier SIT-Py machine-learning prototype. Its 
 | 1. Repository and ML pipeline cleanup | Implemented; the legacy ML tests are in `tests/`. |
 | 2. Collector v2 and SQLite telemetry | Implemented with mocked tests. Real 10-minute sensor acceptance on target hardware is pending. |
 | 3. Module B file and Event Log monitor | Implemented with rule, storage, and mocked Event Log tests. |
-| 4. CLI and packaging | CLI commands and one-file PyInstaller recipe are implemented. The executable has not been built or launched in this environment. |
-| 5. Tests and evaluation tools | The suite passed 117 tests on 2026-10-31. Scenario results and live overhead measurements still need to be collected on Windows with the dependencies installed. |
+| 4. CLI and packaging | CLI commands and one-file PyInstaller build are implemented. The Windows executable built and launched from a console on 2026-11-16. |
+| 5. Tests and evaluation tools | Latest run: 118 passed, 1 failed out of 119. The remaining failure is the NVML-unavailable test on a host where NVML successfully returns real GPU readings. Scenario results and live overhead measurements are still pending. |
 
 The Aurora workload classifier and resource-abuse detector are interfaces only; no ML detector is enabled in Aurora.
 
@@ -55,7 +55,7 @@ Available commands:
 .\.venv\Scripts\python.exe aurora_cli.py status
 ```
 
-Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`. `--quiet` suppresses collector output. `alerts` prints recent records from SQLite; `status` prints the latest snapshot and database counts.
+Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`. `--tag` selects and saves a workload tag in the runtime data directory. `--quiet` suppresses collector output. `alerts` prints recent records from SQLite as severity, timestamp, and title; `status` prints a labeled system report and database counts, with `N/A` for unavailable sensors. The CLI path does not load the legacy machine-learning models.
 
 For standalone collection or monitoring, run `python -m Data.collector_v2` or `python -m Data.file_monitor`. Do not run these alongside the CLI `run` command unless duplicate collection or watcher instances are intended.
 
@@ -77,7 +77,7 @@ Build on Windows from the repository root with the virtual environment active or
 .\build_aurora.ps1
 ```
 
-The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. Run `dist\Aurora.exe` from a console; run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
+The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. The executable was built and its `status` command was verified from a console. Run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
 
 ## Tests and evaluation
 
@@ -87,7 +87,7 @@ Run the unit suite:
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests cover exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts.
+The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts. On 2026-11-16, 118 of 119 tests passed; the NVML-unavailable test failed because NVML was available on the test machine and returned GPU readings.
 
 The scenario runner writes to an isolated temporary watched tree and a fresh SQLite database under `Data/scenario_runs/<run-id>`. It edits a text file, creates a harmless `.exe` data stub that is never executed, copies 100 text files into a test Downloads folder, and simulates Security event 1102 through Module B's queue. It never clears a real Windows Event Log. The default run includes this simulated log-clear case, so explicitly enable it only on a test VM:
 
@@ -143,4 +143,5 @@ scripts/      Scenario runner, alert metrics, and overhead sampler
 tests/        Unit tests (including mocked Windows API tests)
 aurora_cli.py CLI entry point for run, alerts, and status
 Aurora.spec   PyInstaller one-file console build definition
+build_aurora.ps1 Windows build script
 ```

@@ -4,21 +4,20 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import logging
 import os
 import re
 import sqlite3
 import sys
 import threading
-from dataclasses import asdict
+from typing import Any, Optional
 
 from config import DB_PATH, MACHINE_ID, VALID_WORKLOAD_TAGS
 from Core.schema_v2 import SystemSnapshotV2
 from Data import collector_v2
 from Data.collector_v2 import run_collector, set_workload_tag
 from Data.file_monitor import FileMonitor
-from Data.storage import get_db
+from Data.storage import MetricsDB, get_db
 
 
 LOGGER = logging.getLogger("aurora")
@@ -111,6 +110,58 @@ def show_alerts(limit: int) -> int:
     return 0
 
 
+# Number of recent snapshots used to average the rolling bandwidth metrics.
+BANDWIDTH_AVERAGE_WINDOW = 60
+
+
+def _round_optional(value: Optional[float], ndigits: int = 2) -> Optional[float]:
+    """Round a nullable float, leaving ``None`` untouched."""
+    if value is None:
+        return None
+    return round(float(value), ndigits)
+
+
+def _top_gpu_memory_process(snap: SystemSnapshotV2) -> dict[str, Any] | None:
+    """Aggregate the top GPU-memory process: pid, cpu %, and GPU memory MB."""
+    best = None
+    for proc in snap.top_gpu_processes:
+        if proc.gpu_memory_mb is None:
+            continue
+        if best is None or proc.gpu_memory_mb > best.gpu_memory_mb:
+            best = proc
+    if best is None:
+        return None
+    return {
+        "pid": best.pid,
+        "name": best.name,
+        "cpu-percent": _round_optional(best.cpu_percent, 2),
+        "gpu-memory-mb": _round_optional(best.gpu_memory_mb, 2),
+    }
+
+
+def _bandwidth_averages(
+    storage: MetricsDB, machine_id: str
+) -> tuple[Optional[float], Optional[float], int]:
+    """Average bw_rolling_mean and bw_spike over recent snapshots."""
+    recent = storage.query(machine_id=machine_id, limit=BANDWIDTH_AVERAGE_WINDOW)
+    means = [s.bw_rolling_mean for s in recent if s.bw_rolling_mean is not None]
+    spikes = [s.bw_spike for s in recent if s.bw_spike is not None]
+    avg_mean = sum(means) / len(means) if means else None
+    avg_spike = sum(spikes) / len(spikes) if spikes else None
+    return (
+        _round_optional(avg_mean, 2),
+        _round_optional(avg_spike, 2),
+        len(recent),
+    )
+
+
+def _display_value(value: Optional[float], suffix: str = "", digits: int = 1) -> str:
+    """Format a numeric reading or show N/A when that sensor is unavailable."""
+    if value is None:
+        return "N/A"
+    return f"{value:.{digits}f}{suffix}"
+
+
 def _database_counts() -> dict[str, int]:
     """Return total telemetry samples, alerts, and file observations."""
     with sqlite3.connect(DB_PATH) as connection:
@@ -128,10 +179,96 @@ def _database_counts() -> dict[str, int]:
 
 
 def show_status() -> int:
-    """Print the latest snapshot and current SQLite record counts."""
-    latest = get_db().get_latest(MACHINE_ID)
-    snapshot = asdict(latest) if isinstance(latest, SystemSnapshotV2) else None
-    print(json.dumps({"latest_snapshot": snapshot, "db_counts": _database_counts()}, indent=2))
+    """Print the latest snapshot and SQLite counts as a readable console report."""
+    storage = get_db()
+    latest = storage.get_latest(MACHINE_ID)
+    counts = _database_counts()
+
+    print("Aurora status")
+    print("=============")
+    if latest is None:
+        print("No telemetry samples found.")
+        print("\nDatabase")
+        print(f"  Snapshots:          {counts['snapshots']}")
+        print(f"  Alerts recorded:    {counts['alerts']}")
+        print(f"  File observations:  {counts['file_observations']}")
+        return 0
+
+    bw_rolling_avg, bw_spike_avg, bw_samples = _bandwidth_averages(storage, MACHINE_ID)
+    cores = ", ".join(f"{core:.1f}%" for core in latest.cpu_per_core_pct) or "N/A"
+    top_process = _top_gpu_memory_process(latest)
+    if top_process:
+        top_process_text = (
+            f"{top_process['name']} (PID {top_process['pid']}; "
+            f"{_display_value(top_process['gpu-memory-mb'], ' MB')} GPU memory, "
+            f"{_display_value(top_process['cpu-percent'], '%')} CPU)"
+        )
+    else:
+        top_process_text = "N/A"
+
+    print(f"Sample: {latest.timestamp}  |  Machine: {latest.machine_id}  |  Workload: {latest.workload_tag}")
+    print("\nCPU")
+    print(f"  Usage:              {_display_value(latest.cpu_pct, '%')}")
+    print(f"  Per core:           {cores}")
+    print(f"  Change:             {_display_value(latest.cpu_delta, '%', 2)}")
+    print(
+        f"  Rolling average:    {_display_value(latest.cpu_rolling_mean, '%', 2)} "
+        f"(std {_display_value(latest.cpu_rolling_std, '%', 2)})"
+    )
+
+    print("\nMemory")
+    print(f"  Usage:              {_display_value(latest.ram_pct, '%')}")
+    print(
+        f"  Used / total:       {_display_value(latest.ram_used_mb, ' MB', 2)} / "
+        f"{_display_value(latest.ram_total_mb, ' MB', 2)}"
+    )
+    print(f"  Available:          {_display_value(latest.ram_available_mb, ' MB', 2)}")
+    print(f"  Change:             {_display_value(latest.ram_delta, '%', 2)}")
+    print(
+        f"  Rolling average:    {_display_value(latest.ram_rolling_mean, '%', 2)} "
+        f"(std {_display_value(latest.ram_rolling_std, '%', 2)})"
+    )
+
+    print("\nDisk")
+    print(f"  Usage:              {_display_value(latest.disk_pct, '%')}")
+    print(
+        f"  Free / total:       {_display_value(latest.disk_free_gb, ' GB', 2)} / "
+        f"{_display_value(latest.disk_total_gb, ' GB', 2)}"
+    )
+
+    print("\nNetwork")
+    print(f"  Bandwidth:          {_display_value(latest.bandwidth_kbps, ' kbps', 2)}")
+    print(f"  Packet rate:        {_display_value(latest.packet_rate_pps, ' packets/s', 2)}")
+    print(
+        f"  Rolling bandwidth: {_display_value(bw_rolling_avg, ' kbps', 2)} "
+        f"(average over {bw_samples} samples)"
+    )
+    print(f"  Average spike:      {_display_value(bw_spike_avg, 'x', 2)}")
+
+    print("\nGPU")
+    print(f"  Usage:              {_display_value(latest.gpu_util_pct, '%')}")
+    print(
+        f"  Memory:             {_display_value(latest.gpu_mem_used_mb, ' MB', 2)} / "
+        f"{_display_value(latest.gpu_mem_total_mb, ' MB', 2)}"
+    )
+    print(f"  Memory usage:       {_display_value(latest.gpu_mem_pct, '%')}")
+    print(f"  Temperature:        {_display_value(latest.gpu_temp_c, ' deg C')}")
+    print(f"  Fan:                {_display_value(latest.gpu_fan_pct, '%')}")
+    print(
+        f"  Core / memory clock: {_display_value(latest.gpu_core_clock_mhz, ' MHz', 0)} / "
+        f"{_display_value(latest.gpu_mem_clock_mhz, ' MHz', 0)}"
+    )
+    print(f"  Power limit:        {_display_value(latest.gpu_power_limit_w, ' W')}")
+    print(f"  Top memory process: {top_process_text}")
+
+    print("\nCollector")
+    print(f"  CPU:                {_display_value(latest.collector_cpu_pct, '%', 2)}")
+    print(f"  Memory:             {_display_value(latest.collector_rss_mb, ' MB', 2)}")
+
+    print("\nDatabase")
+    print(f"  Snapshots:          {counts['snapshots']}")
+    print(f"  Alerts recorded:    {counts['alerts']}")
+    print(f"  File observations:  {counts['file_observations']}")
     return 0
 
 
