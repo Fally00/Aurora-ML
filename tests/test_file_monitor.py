@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 from Data.file_monitor import (
+    DEFAULT_CONFIG_PATH,
     FileChange,
     FileMonitor,
     MonitorConfig,
@@ -11,6 +12,7 @@ from Data.file_monitor import (
     is_excluded_path,
 )
 from Data.eventlog_monitor import LogClearEvent
+from config import DATA_DIR
 
 
 class MemoryStorage:
@@ -52,6 +54,23 @@ def test_exclusion_rules_include_temp_executable_exception(tmp_path):
     assert is_excluded_path(str(tmp_path / "node_modules" / "pkg" / "tool.exe"), config)
     assert is_excluded_path(str(tmp_path / "Temp" / "scratch.txt"), config)
     assert not is_excluded_path(str(tmp_path / "Temp" / "sample.exe"), config)
+
+
+def test_default_config_excludes_aurora_and_python_runtime_paths(tmp_path):
+    config = MonitorConfig.from_file(DEFAULT_CONFIG_PATH)
+    repo_root = Path(__file__).resolve().parents[1]
+    data_dir = Path(DATA_DIR)
+
+    excluded_paths = [
+        data_dir / "db" / "aurora_metrics.db",
+        repo_root / "README.md",
+        repo_root / ".venv" / "Scripts" / "python.exe",
+        repo_root / "Lib" / "site-packages" / "package.py",
+        repo_root / "Data" / "__pycache__" / "file_monitor.pyc",
+        tmp_path / "Aurora.exe",
+    ]
+    assert all(is_excluded_path(str(path), config) for path in excluded_paths)
+    assert not is_excluded_path(str(Path.home() / "Downloads" / "sample.exe"), config)
 
 
 def test_severity_assignment():

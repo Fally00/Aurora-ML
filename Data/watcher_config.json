@@ -22,9 +22,12 @@
     "cache", "caches", "gpucache", "code cache", "shadercache",
     "node_modules", "build", "dist", ".git", ".svn", "steamapps",
     "steam", "epic games", "xboxgames", "gog galaxy", "origin games",
-    "ea games"
+    "ea games", ".venv", "site-packages", "__pycache__"
   ],
   "excluded_path_fragments": [
+    "$AURORA_DATA_DIR",
+    "$AURORA_REPO_DIR",
+    "\\Aurora.exe",
     "\\Google\\Chrome\\User Data\\",
     "\\Microsoft\\Edge\\User Data\\",
     "\\Mozilla\\Firefox\\Profiles\\",

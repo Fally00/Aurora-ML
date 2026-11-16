@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 from Core.alerts import Alert
 from Data.storage import MetricsDB, get_db
 from Data.eventlog_monitor import LogClearEvent, WindowsEventLogListener
+from config import DATA_DIR
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -69,7 +70,10 @@ class MonitorConfig:
             critical_paths=_resolve_list(raw.get("critical_paths", []), resolve),
             executable_extensions={str(x).lower() for x in raw.get("executable_extensions", [])},
             excluded_directory_names={str(x).strip().lower() for x in raw.get("excluded_directory_names", [])},
-            excluded_path_fragments=[os.path.normcase(str(x)).lower() for x in raw.get("excluded_path_fragments", [])],
+            excluded_path_fragments=[
+                _resolve_exclusion_fragment(str(fragment))
+                for fragment in raw.get("excluded_path_fragments", [])
+            ],
             burst_window_seconds=max(float(raw.get("burst_window_seconds", 2.0)), 0.05),
             burst_threshold=max(int(raw.get("burst_threshold", 25)), 2),
             max_batch_events=max(int(raw.get("max_batch_events", 2048)), 1),
@@ -98,6 +102,19 @@ def _resolve_list(values: list[str], resolver: Callable[[str], str]) -> list[str
     return [resolver(str(value)) for value in values if str(value).strip()]
 
 
+def _resolve_exclusion_fragment(fragment: str) -> str:
+    """Resolve default Aurora path markers while leaving user fragments intact."""
+    roots = {
+        "$AURORA_DATA_DIR": DATA_DIR,
+        "$AURORA_REPO_DIR": str(Path(__file__).resolve().parent.parent),
+    }
+    root = roots.get(fragment)
+    if root is None:
+        return os.path.normcase(fragment).lower()
+    normalized = os.path.normcase(os.path.abspath(root)).lower()
+    return normalized.rstrip("\\/") + os.sep
+
+
 def _within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath((os.path.abspath(path), os.path.abspath(root))) == os.path.abspath(root)
@@ -111,16 +128,15 @@ def is_executable_path(path: str, config: MonitorConfig) -> bool:
 
 
 def is_excluded_path(path: str, config: MonitorConfig) -> bool:
-    """Apply configured cache/build/game exclusions, except temp executables."""
+    """Apply configured exclusions while retaining ordinary temp executables."""
     normalized = os.path.normcase(os.path.abspath(path)).lower()
-    in_temp = any(_within(path, root) for root in config.temp_roots)
-    if in_temp:
-        return not is_executable_path(path, config)
-
     if any(fragment and fragment in normalized for fragment in config.excluded_path_fragments):
         return True
     components = {part.strip().lower() for part in Path(normalized).parts}
-    return bool(components & config.excluded_directory_names)
+    if components & config.excluded_directory_names:
+        return True
+    in_temp = any(_within(path, root) for root in config.temp_roots)
+    return in_temp and not is_executable_path(path, config)
 
 
 def is_startup_path(path: str, config: MonitorConfig) -> bool:
