@@ -28,7 +28,7 @@ def test_run_stops_and_cleans_up_when_collector_fails():
         patch("aurora_cli.FileMonitor", return_value=monitor),
         patch("aurora_cli.run_collector", collector),
     ):
-        assert aurora_cli.run(quiet=True) == 1
+        assert aurora_cli.run(quiet=True, plain=True) == 1
 
     storage.close.assert_called_once_with()
     monitor.stop.assert_called_once_with()

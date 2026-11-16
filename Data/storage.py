@@ -399,6 +399,12 @@ class MetricsDB:
             self._local.conn.close()
             self._local.conn = None
 
+    def flush(self) -> None:
+        """Commit pending work on this thread's connection."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.commit()
+
     def __enter__(self) -> "MetricsDB":
         return self
 

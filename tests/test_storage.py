@@ -5,6 +5,7 @@ Tests for Data.storage — SQLite WAL mode, daily rotation, schema versioning.
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -48,6 +49,15 @@ class TestMetricsDB:
             self.temp_dir.rmdir()
         except Exception:
             pass
+
+    def test_flush_commits_current_thread_connection(self):
+        connection = self.db._get_conn()
+        connection.execute("CREATE TABLE flush_probe (value INTEGER)")
+        connection.execute("INSERT INTO flush_probe VALUES (1)")
+        self.db.flush()
+
+        with sqlite3.connect(self.db_path) as reader:
+            assert reader.execute("SELECT value FROM flush_probe").fetchone() == (1,)
 
     def test_instances_use_their_configured_database(self):
         """Independent instances must honor their own database paths."""

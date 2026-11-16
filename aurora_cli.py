@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import logging.handlers
 import os
@@ -15,26 +14,12 @@ import time
 from collections import deque
 from typing import Any, Optional
 
-try:
-    import msvcrt  # Windows non-blocking keyboard input
-
-    _HAS_MSVCRT = True
-except ImportError:  # pragma: no cover - non-Windows
-    msvcrt = None
-    _HAS_MSVCRT = False
-
-from rich.console import Console
-from rich.layout import Layout
-from rich.live import Live
-
-import aurora_ui
-
 from config import DB_PATH, MACHINE_ID, VALID_WORKLOAD_TAGS
 from Core.schema_v2 import SystemSnapshotV2
-from Data import collector_v2
 from Data.collector_v2 import run_collector, set_workload_tag
 from Data.file_monitor import FileMonitor
 from Data.storage import MetricsDB, get_db
+from aurora_ui import AuroraApp
 
 
 LOGGER = logging.getLogger("aurora")
@@ -69,14 +54,12 @@ def run(
     tag: str | None = None,
     quiet: bool = False,
     *,
-    plain: bool = True,
-    refresh: float = 1.0,
+    plain: bool = False,
 ) -> int:
     """Run telemetry and Module B until interrupted.
 
-    When ``plain`` is False (the default) a btop-style Rich dashboard is
-    shown; when True, the legacy headless alert stream is used (tests and
-    background use rely on this).
+    The Textual dashboard is the default; ``plain`` keeps the headless alert
+    stream available for scripts and background use.
     """
     storage = get_db()
     if tag and not set_workload_tag(tag):
@@ -86,7 +69,7 @@ def run(
     if plain:
         return _run_plain(storage, quiet=quiet)
 
-    return _run_dashboard(storage, refresh=refresh)
+    return _run_dashboard(storage)
 
 
 def _run_plain(storage: MetricsDB, quiet: bool = False) -> int:
@@ -158,9 +141,10 @@ def _setup_dashboard_logging() -> None:
     global _LOG_CAPTURE
     root = logging.getLogger()
     root.handlers.clear()
-    root.setLevel(logging.WARNING)
+    root.setLevel(logging.INFO)
 
     log_path = os.path.join(os.path.dirname(DB_PATH), "aurora.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
     )
@@ -172,7 +156,7 @@ def _setup_dashboard_logging() -> None:
     capture = _LogCaptureHandler()
     root.addHandler(capture)
     _LOG_CAPTURE = capture
-    logging.getLogger("aurora").setLevel(logging.WARNING)
+    logging.getLogger("aurora").setLevel(logging.INFO)
 
 
 def _recent_warnings() -> list[str]:
@@ -185,56 +169,16 @@ def _recent_warnings() -> list[str]:
     return lines
 
 
-# ── Keyboard input ──────────────────────────────────────────────────────
-
-def _get_key() -> Optional[str]:
-    """Non-blocking single-key read. Returns 'UP'/'DOWN' for arrows, else the char."""
-    if not _HAS_MSVCRT or msvcrt is None:
-        return None
-    if not msvcrt.kbhit():
-        return None
-    ch = msvcrt.getch()
-    if isinstance(ch, bytes):
-        ch = ch.decode("utf-8", errors="replace")
-    if ch in ("\x00", "\xe0"):  # special key prefix (arrow / function keys)
-        if msvcrt.kbhit():
-            ch2 = msvcrt.getch()
-            if isinstance(ch2, bytes):
-                ch2 = ch2.decode("utf-8", errors="replace")
-            return {"H": "UP", "P": "DOWN", "M": "RIGHT", "K": "LEFT"}.get(ch2)
-        return None
-    return ch
-
-
-def _resolve_selected(
-    alerts: list[Any], scroll: int, selected: Optional[int]
-) -> Optional[Any]:
-    """Resolve the currently selected alert (newest-first order, scroll-adjusted)."""
-    if selected is None:
-        return None
-    ordered = list(reversed(alerts))
-    visible = ordered[scroll:]
-    if selected < 0 or selected >= len(visible):
-        return None
-    return visible[selected]
-
-
 # ── Dashboard ───────────────────────────────────────────────────────────
 
-def _run_dashboard(storage: MetricsDB, refresh: float) -> int:
-    """btop-style Rich Live dashboard. Reads from SQLite; collector/Module B
-    threads keep running as in plain mode."""
-    console = Console()
-    layout = _build_layout(console)
-
+def _run_dashboard(storage) -> int:
+    """Run the Textual UI with background collection and monitoring."""
     stop_event = threading.Event()
     collector_failed = threading.Event()
     monitor = FileMonitor(storage=storage)
-    start_time = time.monotonic()
-
     collector_thread = threading.Thread(
         target=_run_collector,
-        args=(stop_event, True, collector_failed),  # dashboard: quiet collector
+        args=(stop_event, True, collector_failed),
         name="aurora-collector",
         daemon=True,
     )
@@ -246,106 +190,16 @@ def _run_dashboard(storage: MetricsDB, refresh: float) -> int:
     )
     collector_thread.start()
     monitor_thread.start()
-
-    # Rolling history (oldest first) for sparklines.
-    history: deque[SystemSnapshotV2] = deque(maxlen=60)
-    scroll = 0
-    selected: Optional[int] = None
-
-    live = Live(
-        layout,
-        console=console,
-        screen=True,
-        auto_refresh=False,
-        refresh_per_second=4,
-        redirect_stdout=False,
-        redirect_stderr=False,
-    )
-
-    def render() -> None:
-        nonlocal scroll, selected
-        latest = storage.get_latest(MACHINE_ID)
-        if latest and (not history or history[-1].timestamp_ns != latest.timestamp_ns):
-            history.append(latest)
-
-        alerts = list(storage.get_alerts(limit=200))
-        ordered = list(reversed(alerts))
-        max_scroll = max(0, len(ordered) - 1)
-        scroll = max(0, min(scroll, max_scroll))
-        if selected is not None and selected >= max(0, len(ordered) - scroll):
-            selected = None
-
-        panel_w = max(20, console.width // 2 - 2)
-        warnings = _recent_warnings()
-        uptime_seconds = int(time.monotonic() - start_time)
-        uptime = f"{uptime_seconds // 3600}:{(uptime_seconds % 3600) // 60:02d}:{uptime_seconds % 60:02d}"
-        workload = latest.workload_tag if latest else "idle"
-        timestamp = latest.timestamp if latest else "--"
-
-        layout["header"].update(
-            aurora_ui.header_panel(
-                MACHINE_ID,
-                workload,
-                timestamp,
-                uptime,
-                monitor.watched_root_count,
-                monitor.event_log_active,
-                latest.collector_cpu_pct if latest else None,
-                latest.collector_rss_mb if latest else None,
-                width=console.width,
-            )
-        )
-        layout["cpu"].update(aurora_ui.cpu_panel(latest, history, panel_w))
-        layout["gpu"].update(aurora_ui.gpu_panel(latest, panel_w))
-        layout["mem"].update(aurora_ui.memory_panel(latest, panel_w))
-        layout["disk"].update(aurora_ui.disk_panel(latest, panel_w))
-        layout["net"].update(aurora_ui.network_panel(latest, history, panel_w))
-        layout["processes"].update(aurora_ui.processes_panel(latest, panel_w))
-        layout["alerts"].update(
-            aurora_ui.alerts_panel(
-                alerts,
-                panel_w,
-                max(6, console.height - 10),
-                scroll=scroll,
-                selected=selected,
-            )
-        )
-        layout["footer"].update(aurora_ui.footer_panel())
-
-    render()
-    live.update(layout)
-
     try:
-        with live:
-            last_update = 0.0
-            while not stop_event.is_set() and not collector_failed.is_set():
-                now = time.monotonic()
-                if now - last_update >= max(0.1, refresh):
-                    render()
-                    live.update(layout)
-                    last_update = now
-
-                key = _get_key()
-                if key is not None:
-                    if key == "q":
-                        break
-                    elif key == "\t":  # tab: cycle focus
-                        selected = None
-                    elif key == "UP":
-                        scroll = max(0, scroll - 1)
-                    elif key == "DOWN":
-                        scroll += 1
-                    elif key in ("n", "d"):
-                        alert = _resolve_selected(list(storage.get_alerts(limit=200)), scroll, selected)
-                        if alert is None:
-                            continue
-                        if key == "n":
-                            storage.mark_alert_normal(alert.id)
-                        else:
-                            storage.dismiss_alert(alert.id)
-                        selected = None
-
-                time.sleep(0.05)
+        AuroraApp(
+            storage,
+            machine_id=MACHINE_ID,
+            monitor=monitor,
+            warning_provider=_recent_warnings,
+            collector_failed=collector_failed,
+        ).run()
+    except KeyboardInterrupt:
+        pass
     finally:
         stop_event.set()
         try:
@@ -354,34 +208,12 @@ def _run_dashboard(storage: MetricsDB, refresh: float) -> int:
             LOGGER.warning("Error while stopping Module B: %s", exc)
         monitor_thread.join(timeout=3.0)
         collector_thread.join(timeout=3.0)
+        storage.flush()
         storage.close()
     return 1 if collector_failed.is_set() else 0
 
 
-def _build_layout(console: Console) -> Layout:
-    """Build the responsive dashboard layout (degrades under 80x24)."""
-    root = Layout(name="root")
-    root.split(
-        Layout(name="header", size=3),
-        Layout(name="body", ratio=1),
-        Layout(name="footer", size=1),
-    )
-    root["body"].split_row(
-        Layout(name="left", ratio=1),
-        Layout(name="right", ratio=1),
-    )
-    root["left"].split(
-        Layout(name="cpu", ratio=1),
-        Layout(name="gpu", ratio=1),
-        Layout(name="mem", ratio=1),
-        Layout(name="disk", ratio=1),
-        Layout(name="net", ratio=1),
-    )
-    root["right"].split(
-        Layout(name="processes", ratio=1),
-        Layout(name="alerts", ratio=2),
-    )
-    return root
+def show_alerts(limit: int) -> int:
     """Print recent stored alerts, newest first."""
     for alert in get_db().get_alerts(limit=limit):
         _print_alert(alert)
@@ -562,13 +394,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="headless mode: print one alert per line (no dashboard)",
     )
-    run_parser.add_argument(
-        "--refresh",
-        type=float,
-        default=1.0,
-        help="dashboard refresh interval in seconds (default: 1)",
-    )
-
     alerts_parser = subparsers.add_parser("alerts", help="print recent alerts from SQLite")
     alerts_parser.add_argument("--limit", type=int, default=20, help="number of recent alerts")
     status_parser = subparsers.add_parser("status", help="print latest snapshot and database counts")
@@ -584,7 +409,6 @@ def main(argv: list[str] | None = None) -> int:
             tag=getattr(args, "tag", None),
             quiet=True,
             plain=False,
-            refresh=args.refresh,
         )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command in (None, "run"):
@@ -592,7 +416,6 @@ def main(argv: list[str] | None = None) -> int:
             tag=getattr(args, "tag", None),
             quiet=getattr(args, "quiet", False),
             plain=getattr(args, "plain", False),
-            refresh=args.refresh,
         )
     if args.command == "alerts":
         if args.limit < 0:
