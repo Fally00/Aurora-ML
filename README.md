@@ -20,7 +20,7 @@ The Aurora workload classifier and resource-abuse detector are interfaces only; 
 
 - Windows 10 or 11, 64-bit, for filesystem notifications and the packaged executable.
 - Python 3.12 64-bit is recommended for this repository's pinned NumPy and scikit-learn versions. Their Windows wheels include CPython 3.12 builds: [NumPy 1.26.4](https://pypi.org/project/numpy/1.26.4/) and [scikit-learn 1.5.1](https://pypi.org/project/scikit-learn/1.5.1/).
-- Install the pinned packages from `requirements.txt`. This includes watchdog, psutil, PyInstaller, and the legacy ML packages.
+- Install the pinned packages from `requirements.txt`. This includes watchdog, psutil, PyInstaller, rich, and the legacy ML packages.
 - NVIDIA GPU measurements require an installed NVIDIA driver. Run `python -m Data.verify_nvml` to inspect NVML access. CPU package temperature and clocks are optional and require LibreHardwareMonitor running with its WMI interface enabled.
 - Administrator rights are only needed for Windows Event Log clear subscriptions (Security event 1102 and System event 104). File watching and telemetry continue without elevation; one warning is logged when Event Log access is unavailable.
 
@@ -71,6 +71,13 @@ Dashboard keys:
 | n | Mark the selected alert normal |
 | d | Dismiss the selected alert |
 
+Dashboard logging:
+
+In dashboard mode, logging is **not** written to the console. WARNING+
+lines are routed to a rotating log file at `Data/db/aurora.log` (source
+checkout) or `%LOCALAPPDATA%\Aurora\Data\aurora.log` (packaged app), and
+the most recent few appear in a small strip alongside the alerts panel.
+
 Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`.
 `--tag` selects and saves a workload tag in the runtime data directory.
 `--plain` keeps the legacy headless alert stream (tests and background use
@@ -104,7 +111,7 @@ Build on Windows from the repository root with the virtual environment active or
 .\build_aurora.ps1
 ```
 
-The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. The executable was built and its `status` command was verified from a console. Run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
+The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). `rich` is added to the build hidden imports; `sklearn` remains excluded so the CLI does not import legacy ML. Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. The executable was built and its `status` command and `run` dashboard were both verified from a console. Run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
 
 ## Tests and evaluation
 
@@ -114,7 +121,7 @@ Run the unit suite:
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts. On 2026-11-16, all 119 tests passed; the NVML-unavailable test is now hermetic so it passes on hosts with a real GPU.
+The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, dashboard render functions (sparkline, usage bars, panel rendering, alert ordering/colors/scroll), and the evaluation scripts. On 2026-11-16, all 141 tests passed; the NVML-unavailable test is now hermetic so it passes on hosts with a real GPU.
 
 The scenario runner writes to an isolated temporary watched tree and a fresh SQLite database under `Data/scenario_runs/<run-id>`. It edits a text file, creates a harmless `.exe` data stub that is never executed, copies 100 text files into a test Downloads folder, and simulates Security event 1102 through Module B's queue. It never clears a real Windows Event Log. The default run includes this simulated log-clear case, so explicitly enable it only on a test VM:
 
