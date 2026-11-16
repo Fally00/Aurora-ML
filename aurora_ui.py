@@ -95,11 +95,17 @@ def sparkline(
         text.append(EMPTY_BLOCK * max(width, 0), style="gray50")
         return text
 
-    # Downsample to `width` points by taking evenly-spaced samples.
-    step = max(1, len(pts) // width)
-    samples = pts[::step][:width]
-    if not samples:
-        samples = pts[-width:]
+    # Downsample to exactly `width` points by even spacing across the series.
+    n = len(pts)
+    if n == 1:
+        samples = list(pts) * width
+    elif width == 1:
+        samples = [pts[-1]]
+    else:
+        samples = [
+            pts[min(n - 1, int(round(i * (n - 1) / (width - 1))))]
+            for i in range(width)
+        ]
 
     vmin = min(samples)
     vmax = max(samples)

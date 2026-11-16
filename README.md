@@ -38,28 +38,55 @@ If the Python launcher command differs on your machine, create the virtual envir
 
 ## Run Aurora
 
-Start telemetry collection and Module B monitoring with:
+Start telemetry collection, Module B monitoring, and the btop-style
+terminal dashboard with:
 
 ```powershell
 .\.venv\Scripts\python.exe aurora_cli.py
 ```
 
-The default `run` command polls telemetry once per second and watches configured files and Event Logs until Ctrl+C. The collector and Module B watcher run independently; Module B startup failure does not stop telemetry. Newly stored alerts are printed one per line with severity, time, and title.
+The default `run` command shows a live dashboard (CPU, GPU, memory, disk,
+network, top processes, and an alerts feed) and refreshes once per second.
+The collector and Module B watcher run in the background; Module B startup
+failure does not stop telemetry.
 
 Available commands:
 
 ```powershell
+.\.venv\Scripts\python.exe aurora_cli.py            # dashboard (default)
 .\.venv\Scripts\python.exe aurora_cli.py run --tag gaming
-.\.venv\Scripts\python.exe aurora_cli.py run --quiet
+.\.venv\Scripts\python.exe aurora_cli.py run --plain   # headless, one alert per line
+.\.venv\Scripts\python.exe aurora_cli.py run --refresh 2 # dashboard refresh interval (s)
 .\.venv\Scripts\python.exe aurora_cli.py alerts --limit 20
 .\.venv\Scripts\python.exe aurora_cli.py status
 ```
 
-Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`. `--tag` selects and saves a workload tag in the runtime data directory. `--quiet` suppresses collector output. `alerts` prints recent records from SQLite as severity, timestamp, and title; `status` prints a labeled system report and database counts, with `N/A` for unavailable sensors. The CLI path does not load the legacy machine-learning models.
+Dashboard keys:
 
-For standalone collection or monitoring, run `python -m Data.collector_v2` or `python -m Data.file_monitor`. Do not run these alongside the CLI `run` command unless duplicate collection or watcher instances are intended.
+| Key | Action |
+|-----|--------|
+| q | Quit and shut down cleanly |
+| Tab | Cycle focus between panels |
+| ↑ / ↓ | Scroll the focused list (alerts) |
+| n | Mark the selected alert normal |
+| d | Dismiss the selected alert |
 
-To change the tag during a source checkout run, write one supported value to `Data/workload_tag.txt`. In the packaged app, the runtime data directory is `%LOCALAPPDATA%\Aurora\Data`.
+Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`.
+`--tag` selects and saves a workload tag in the runtime data directory.
+`--plain` keeps the legacy headless alert stream (tests and background use
+rely on it); `--quiet` suppresses collector sample output. `alerts` prints
+recent records from SQLite as severity, timestamp, and title; `status`
+prints a labeled system report and database counts, with `N/A` for
+unavailable sensors. The CLI path does not load the legacy machine-learning
+models.
+
+For standalone collection or monitoring, run `python -m Data.collector_v2`
+or `python -m Data.file_monitor`. Do not run these alongside the CLI `run`
+command unless duplicate collection or watcher instances are intended.
+
+To change the tag during a source checkout run, write one supported value to
+`Data/workload_tag.txt`. In the packaged app, the runtime data directory is
+`%LOCALAPPDATA%\Aurora\Data`.
 
 ## File monitoring and alerts
 
@@ -141,7 +168,8 @@ Core/         Schemas, alerts, legacy models, and Aurora model interfaces
 Data/         Collector v2, SQLite storage, Module B, watcher configuration
 scripts/      Scenario runner, alert metrics, and overhead sampler
 tests/        Unit tests (including mocked Windows API tests)
-aurora_cli.py CLI entry point for run, alerts, and status
+aurora_cli.py CLI entry point for run, alerts, status, and the dashboard
+aurora_ui.py  Pure Rich render functions for the btop-style dashboard
 Aurora.spec   PyInstaller one-file console build definition
 build_aurora.ps1 Windows build script
 ```

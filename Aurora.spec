@@ -2,6 +2,7 @@
 hiddenimports = [
     "pynvml",
     "wmi",
+    "rich",
     "win32timezone",
     "win32evtlog",
     "win32event",
