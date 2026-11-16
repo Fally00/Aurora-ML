@@ -21,9 +21,6 @@ from Data.storage import MetricsDB, get_db
 
 
 LOGGER = logging.getLogger("aurora")
-# The protected legacy collector's startup message reads DB_PATH as a module
-# global even though it is not imported there. Supply the configured path here.
-collector_v2.DB_PATH = DB_PATH
 
 
 def _print_alert(alert, *, stream=None) -> None:

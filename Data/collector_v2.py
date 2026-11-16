@@ -39,6 +39,7 @@ from config import (
     ROLLING_WINDOW_V2,
     DB_FLUSH_INTERVAL,
     DB_BATCH_SIZE,
+    DB_PATH,
     MACHINE_ID,
     SCHEMA_VERSION,
     WORKLOAD_TAG_FILE,
