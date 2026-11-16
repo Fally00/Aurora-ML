@@ -49,11 +49,11 @@ def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
 
 def run(tag: str | None = None, quiet: bool = False) -> int:
     """Run telemetry and Module B until interrupted."""
+    storage = get_db()
     if tag and not set_workload_tag(tag):
         LOGGER.error("Unsupported workload tag: %s", tag)
         return 2
 
-    storage = get_db()
     console = sys.stdout
     seen_ids = {alert.id for alert in storage.get_alerts(limit=500)}
     stop_event = threading.Event()
