@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-if (-not $IsWindows) {
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw "Build Aurora.exe on Windows with a Windows Python environment."
 }
 
