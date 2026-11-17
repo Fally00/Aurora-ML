@@ -56,9 +56,9 @@ def _alert(severity: str, title: str, timestamp: str = "2026-11-17 01:00:00") ->
     )
 
 
-def _pilot(app: AuroraApp, scenario) -> None:
+def _pilot(app: AuroraApp, scenario, size=(120, 45)) -> None:
     async def run_scenario():
-        async with app.run_test(size=(120, 45)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await scenario(pilot)
 
     asyncio.run(run_scenario())
@@ -108,6 +108,24 @@ def test_empty_database_and_unavailable_gpu_render(tmp_path):
         storage.close()
 
 
+def test_compact_layout_keeps_command_bar_visible(tmp_path):
+    storage = MetricsDB(str(tmp_path / "compact.db"))
+    app = AuroraApp(storage)
+
+    async def scenario(pilot):
+        assert app.query_one("#command").region.bottom <= 24
+        assert app.query_one("#metrics-grid").region.y >= 0
+        assert app.query_one("#tables-grid").region.y >= 0
+        await pilot.resize_terminal(120, 45)
+        await pilot.pause()
+        assert app.query_one("#metrics-grid").region.height > 8
+
+    try:
+        _pilot(app, scenario, size=(80, 24))
+    finally:
+        storage.close()
+
+
 def test_interval_refresh_updates_widgets(tmp_path):
     storage = MetricsDB(str(tmp_path / "refresh.db"))
     app = AuroraApp(storage)
@@ -117,7 +135,10 @@ def test_interval_refresh_updates_widgets(tmp_path):
         await pilot.pause(1.2)
         cpu = app.query_one("#cpu", Static).content.plain
         assert "CPU 42.0%" in cpu
-        assert "CPU temp: N/A (LibreHardwareMonitor not running)" in cpu
+        assert "Per-core:" in cpu
+        assert "CPU temp: N/A (LibreHardwareMonitor not running)" in (
+            app.query_one("#warning-strip", Static).content.plain
+        )
         assert "tag=gaming" in app.query_one("#header", Static).content.plain
 
     try:
@@ -142,6 +163,25 @@ def test_alert_filters_counts_and_newest_first():
     assert alert_counts(alerts) == {"critical": 1, "warning": 1, "info": 1}
     assert [item.title for item in filtered_alerts(alerts, "warn")] == ["warning"]
     assert [item.title for item in alerts] == ["older", "warning", "critical"]
+
+
+def test_alert_table_order_colors_and_count_title(tmp_path):
+    storage = MetricsDB(str(tmp_path / "alert-view.db"))
+    storage.record_alert(_alert("info", "older", "2026-11-17 00:59:00"))
+    storage.record_alert(_alert("critical", "newest", "2026-11-17 01:01:00"))
+    app = AuroraApp(storage)
+
+    async def scenario(_pilot):
+        table = app.query_one("#alerts", DataTable)
+        assert table.get_row_at(0)[2].plain == "newest"
+        assert str(table.get_row_at(0)[1].style) == "bold red"
+        assert "1 crit" in str(app.query_one("#alerts-title", Static).content)
+        assert "1 info" in str(app.query_one("#alerts-title", Static).content)
+
+    try:
+        _pilot(app, scenario)
+    finally:
+        storage.close()
 
 
 def test_filter_pause_and_resume_keys(tmp_path):

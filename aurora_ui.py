@@ -13,11 +13,11 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Grid, Horizontal, Vertical
+from textual.containers import Grid, Vertical
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from Core.alerts import Alert
-from Core.schema_v2 import ProcessInfo, SystemSnapshotV2
+from Core.schema_v2 import SystemSnapshotV2
 from Data.collector_v2 import set_workload_tag
 from Data.storage import MetricsDB
 
@@ -143,6 +143,15 @@ def cpu_text(
 ) -> Text:
     if snapshot is None:
         return Text("CPU  N/A\nNo telemetry samples yet.", style="dim")
+    core_levels = "".join(
+        _SPARK_CHARS[max(0, min(7, round(max(0.0, min(float(value), 100.0)) * 7 / 100)))]
+        for value in snapshot.cpu_per_core_pct
+    )
+    temperature = (
+        f"{snapshot.cpu_package_temp_c:.1f}°C"
+        if snapshot.cpu_package_temp_c is not None
+        else "N/A"
+    )
     lines = [
         Text.assemble(
             ("CPU ", "bold"),
@@ -150,20 +159,7 @@ def cpu_text(
             sparkline([sample.cpu_pct for sample in history], max(8, width - 12)),
         )
     ]
-    for index, percent in enumerate(snapshot.cpu_per_core_pct):
-        lines.append(
-            Text.assemble(
-                (f"{index:02d} ", "dim"),
-                usage_bar(percent, 12),
-                (f" {percent:.0f}%", "dim"),
-            )
-        )
-    temperature = (
-        f"CPU temp: {snapshot.cpu_package_temp_c:.1f}°C"
-        if snapshot.cpu_package_temp_c is not None
-        else "CPU temp: N/A (LibreHardwareMonitor not running)"
-    )
-    lines.append(Text(temperature, style="dim"))
+    lines.append(Text(f"Per-core: {core_levels}  temp {temperature}", style="dim"))
     return _join_lines(lines)
 
 
@@ -277,15 +273,14 @@ class AuroraApp(App[None]):
     TITLE = "Aurora"
     CSS = """
     Screen { layout: vertical; }
-    #header { height: 3; border: round $accent; padding: 0 1; }
-    #warning-strip { height: 2; border: round $warning; padding: 0 1; color: $warning; }
+    #header { height: 1; padding: 0 1; }
+    #warning-strip { height: 1; padding: 0 1; color: $warning; }
     #metrics-grid { height: 1fr; min-height: 10; grid-size: 3 2; grid-columns: 1fr 1fr 1fr; grid-rows: 1fr 1fr; }
     #tables-grid { height: 1fr; min-height: 10; grid-size: 2 1; grid-columns: 1fr 1fr; }
     .metric { border: round $primary; padding: 0 1; height: 1fr; overflow: hidden; }
     .table-panel { border: round $primary; height: 1fr; }
     .table-title { height: 1; padding: 0 1; color: $accent; text-style: bold; }
     DataTable { height: 1fr; }
-    #console-title { height: 1; padding: 0 1; color: $accent; }
     #console { height: 7; border: round $secondary; }
     #command { height: 3; }
     """
@@ -344,14 +339,50 @@ class AuroraApp(App[None]):
                 table = DataTable(id="alerts", cursor_type="row", zebra_stripes=True)
                 table.add_columns("Time", "Severity", "Alert")
                 yield table
-        yield Static("CONSOLE", id="console-title")
-        yield RichLog(id="console", wrap=False, max_lines=500)
+        console = RichLog(id="console", wrap=False, max_lines=500)
+        console.border_title = "CONSOLE"
+        yield console
         yield Input(placeholder="Type : or / for commands; try help", id="command")
 
     def on_mount(self) -> None:
         self.query_one("#command", Input).blur()
+        self._apply_responsive_layout(self.size.height)
         self.refresh_data()
         self.set_interval(1.0, self.refresh_data)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_responsive_layout(event.size.height)
+
+    def _apply_responsive_layout(self, height: int) -> None:
+        if not self.is_mounted:
+            return
+        compact = height < 34
+        sizes = (
+            {
+                "#header": 1,
+                "#warning-strip": 1,
+                "#metrics-grid": 8,
+                "#tables-grid": 6,
+                "#console": 3,
+                "#command": 3,
+            }
+            if compact
+            else {
+                "#header": 1,
+                "#warning-strip": 1,
+                "#metrics-grid": "1fr",
+                "#tables-grid": "1fr",
+                "#console": 7,
+                "#command": 3,
+            }
+        )
+        for widget_id, widget_height in sizes.items():
+            widget = self.query_one(widget_id)
+            widget.styles.height = widget_height
+            if widget_id in {"#metrics-grid", "#tables-grid"}:
+                widget.styles.min_height = 8 if compact else 10
+            else:
+                widget.styles.min_height = widget_height
 
     def on_key(self, event: events.Key) -> None:
         if event.character in {":", "/"} and self.focused is not self.query_one("#command", Input):
@@ -389,9 +420,14 @@ class AuroraApp(App[None]):
                 self.latest.collector_rss_mb if self.latest else None,
             )
         )
-        warnings = list(self.warning_provider())[-2:]
+        warnings = list(self.warning_provider())
+        warning = warnings[-1] if warnings else "No WARNING+ messages"
+        if self.latest is not None and self.latest.cpu_package_temp_c is None:
+            warning = "CPU temp: N/A (LibreHardwareMonitor not running)"
+            if warnings and warnings[-1] != warning:
+                warning += f" | {warnings[-1]}"
         self.query_one("#warning-strip", Static).update(
-            "\n".join(warnings) if warnings else "No WARNING+ messages"
+            Text(warning, no_wrap=True, overflow="ellipsis")
         )
         self.query_one("#cpu", Static).update(cpu_text(self.latest, self.history))
         self.query_one("#gpu", Static).update(gpu_text(self.latest))

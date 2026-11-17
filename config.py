@@ -5,15 +5,15 @@ All runtime modules should import paths and tunables from here instead of
 hard-coding dataset locations or thresholds.
 
 Configuration sections:
-- Directories: ROOT_DIR, MODELS_DIR, DATA_DIR, DATASETS_DIR, CORE_DIR, PIPELINE_DIR
+- Directories: ROOT_DIR, MODELS_DIR, DATA_DIR, DATASETS_DIR
 - Runtime files: LOG_PATH, LIVE_CSV, RETRAIN_LOG
 - Base training datasets: ANOMALY_DATASET_CSV, CLASSIFIER_DATASET_CSV, PREDICTOR_DATASET_CSV
-- Pipeline tuning: POLL_INTERVAL, WINDOW_SIZE, MAX_HISTORY, MAX_CSV_ROWS
+- Pipeline tuning: POLL_INTERVAL, WINDOW_SIZE, MAX_CSV_ROWS
 - Retraining: RETRAIN_ROW_THRESHOLD, LIVE_DATA_WEIGHT, LABELED_LOG_WEIGHT, RANDOM_STATE
-- ML thresholds: ANOMALY_Z_THRESHOLD, CONTAMINATION, ANOMALY_ALERT_THRESHOLD
+- ML thresholds: ANOMALY_Z_THRESHOLD, ANOMALY_ALERT_THRESHOLD
 - Workload thresholds: WORKLOAD_THRESHOLDS
 - Model hyperparameters: ANOMALY_MODEL_PARAMS, CLASSIFIER_MODEL_PARAMS, PREDICTOR_MODEL_PARAMS
-"""
+"""
 
 from __future__ import annotations
 
@@ -40,8 +40,6 @@ if getattr(sys, "frozen", False):
 else:
     DATA_DIR = os.path.join(ROOT_DIR, "Data")
 DATASETS_DIR = os.path.join(DATA_DIR, "datasets")
-CORE_DIR = os.path.join(ROOT_DIR, "Core")
-PIPELINE_DIR = os.path.join(ROOT_DIR, "pipeline")
 
 # Runtime files
 LOG_PATH = os.path.join(DATA_DIR, "sit_log.csv")
@@ -56,7 +54,6 @@ PREDICTOR_DATASET_CSV = os.path.join(DATASETS_DIR, "predictor_FINAL.csv")
 # Pipeline tuning
 POLL_INTERVAL = 2
 WINDOW_SIZE = 15
-MAX_HISTORY = 60
 MAX_CSV_ROWS = 5_000
 
 # Retraining
@@ -67,7 +64,6 @@ RANDOM_STATE = 42
 
 # ML thresholds
 ANOMALY_Z_THRESHOLD = 2.5
-CONTAMINATION = 0.10
 ANOMALY_ALERT_THRESHOLD = 0.60
 
 # Workload thresholds used to label live data when no label exists yet.
