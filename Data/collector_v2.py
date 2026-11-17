@@ -15,6 +15,7 @@ Signals:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import sys
@@ -39,6 +40,7 @@ from config import (
     ROLLING_WINDOW_V2,
     DB_FLUSH_INTERVAL,
     DB_BATCH_SIZE,
+    DB_PATH,
     MACHINE_ID,
     SCHEMA_VERSION,
     WORKLOAD_TAG_FILE,
@@ -49,6 +51,7 @@ from config import (
 from Core.schema_v2 import SystemSnapshotV2, ProcessInfo
 from Data.storage import get_db
 
+LOGGER = logging.getLogger(__name__)
 
 # ── Global state for sensors ────────────────────────────────────────────────
 
@@ -206,9 +209,7 @@ def _init_lhm() -> bool:
     """Initialize LibreHardwareMonitor WMI. Returns True on success (Windows only)."""
     global _lhm_handle, _lhm_initialized, _lhm_warning_logged
     if platform.system() != "Windows":
-        if not _lhm_warning_logged:
-            print("[Collector] LibreHardwareMonitor is available on Windows only", file=sys.stderr)
-            _lhm_warning_logged = True
+        _warn_lhm_unavailable()
         _lhm_initialized = True
         return False
     if _lhm_initialized:
@@ -219,11 +220,17 @@ def _init_lhm() -> bool:
         _lhm_initialized = True
         return True
     except Exception as e:
-        if not _lhm_warning_logged:
-            print(f"[Collector] LibreHardwareMonitor unavailable (run as admin?): {e}", file=sys.stderr)
-            _lhm_warning_logged = True
+        LOGGER.debug("LibreHardwareMonitor initialization failed: %s", e)
+        _warn_lhm_unavailable()
         _lhm_initialized = True
         return False
+
+
+def _warn_lhm_unavailable() -> None:
+    global _lhm_warning_logged
+    if not _lhm_warning_logged:
+        LOGGER.warning("CPU temp: N/A (LibreHardwareMonitor not running)")
+        _lhm_warning_logged = True
 
 
 def _get_cpu_package_temp_and_clocks() -> Tuple[Optional[float], List[float]]:
@@ -243,30 +250,34 @@ def _get_cpu_package_temp_and_clocks() -> Tuple[Optional[float], List[float]]:
             elif s.SensorType == "Clock" and "core" in s.Name.lower():
                 core_clocks.append(float(s.Value))
 
-        if package_temp is None and not core_clocks and not _lhm_warning_logged:
-            print("[Collector] LibreHardwareMonitor returned no CPU temperature or clock sensors", file=sys.stderr)
-            _lhm_warning_logged = True
+        if package_temp is None and not core_clocks:
+            _warn_lhm_unavailable()
         return package_temp, core_clocks
     except Exception as e:
-        if not _lhm_warning_logged:
-            print(f"[Collector] LibreHardwareMonitor sensor read failed: {e}", file=sys.stderr)
-            _lhm_warning_logged = True
+        LOGGER.debug("LibreHardwareMonitor sensor read failed: %s", e)
+        _warn_lhm_unavailable()
         return None, []
 
 
 # ── psutil helpers ──────────────────────────────────────────────────────────
 
 def _get_top_cpu_processes(n: int = 5) -> List[ProcessInfo]:
-    """Get top N processes by CPU%."""
+    """Get top N processes by CPU, normalized to total logical CPU capacity."""
     procs = []
+    logical_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
     for proc in psutil.process_iter(["pid", "name", "cpu_percent"]):
         try:
             info = proc.info
-            if info["cpu_percent"] and info["cpu_percent"] > 0:
+            pid = info["pid"]
+            name = info["name"] or "unknown"
+            if pid == 0 or name.casefold() == "system idle process":
+                continue
+            cpu_percent = (info["cpu_percent"] or 0.0) / logical_cpus
+            if cpu_percent > 0:
                 procs.append(ProcessInfo(
-                    pid=info["pid"],
-                    name=info["name"] or "unknown",
-                    cpu_percent=info["cpu_percent"],
+                    pid=pid,
+                    name=name,
+                    cpu_percent=min(cpu_percent, 100.0),
                 ))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -287,13 +298,14 @@ def _get_top_gpu_processes(n: int = 5) -> List[ProcessInfo]:
         all_procs = compute_procs + graphics_procs
 
         procs = []
+        logical_cpus = max(psutil.cpu_count(logical=True) or 1, 1)
         for p in all_procs:
             try:
                 ps = psutil.Process(p.pid)
                 procs.append(ProcessInfo(
                     pid=p.pid,
                     name=ps.name(),
-                    cpu_percent=ps.cpu_percent(),
+                    cpu_percent=min(ps.cpu_percent() / logical_cpus, 100.0),
                     gpu_memory_mb=p.usedGpuMemory / (1024 ** 2) if p.usedGpuMemory else 0.0,
                 ))
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -480,10 +492,11 @@ def run_collector(
     stop_event: Optional[threading.Event] = None,
 ) -> None:
     """Main polling loop. Writes to SQLite until duration or stop event."""
-    print(f"[Collector v2] Starting - polling every {POLL_INTERVAL_V2}s")
-    print(f"[Collector v2] Machine: {MACHINE_ID} | DB: {DB_PATH}")
-    print(f"[Collector v2] Workload tag: {get_workload_tag()} (edit {WORKLOAD_TAG_FILE} to change)")
-    print("-" * 60)
+    if verbose:
+        print(f"[Collector v2] Starting - polling every {POLL_INTERVAL_V2}s")
+        print(f"[Collector v2] Machine: {MACHINE_ID} | DB: {DB_PATH}")
+        print(f"[Collector v2] Workload tag: {get_workload_tag()} (edit {WORKLOAD_TAG_FILE} to change)")
+        print("-" * 60)
 
     db = get_db()
     db.prune_old_data()
@@ -524,7 +537,8 @@ def run_collector(
                     print(f"  -> flushed {snapshot_num} rows to SQLite")
 
             if duration_seconds and (time.time() - start_time) >= duration_seconds:
-                print(f"[Collector] Duration reached ({duration_seconds}s), stopping.")
+                if verbose:
+                    print(f"[Collector] Duration reached ({duration_seconds}s), stopping.")
                 break
             if stop_event is not None and stop_event.is_set():
                 break
@@ -536,11 +550,13 @@ def run_collector(
                 time.sleep(sleep_time)
 
     except KeyboardInterrupt:
-        print("\n[Collector] Stopped by user.")
+        if verbose:
+            print("\n[Collector] Stopped by user.")
     finally:
         if buffer:
             db.insert_batch(buffer)
-        print(f"[Collector] Done. Total snapshots: {snapshot_num}")
+        if verbose:
+            print(f"[Collector] Done. Total snapshots: {snapshot_num}")
 
 
 # ── Entry Point ─────────────────────────────────────────────────────────────

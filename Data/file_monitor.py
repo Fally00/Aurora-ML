@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 from Core.alerts import Alert
 from Data.storage import MetricsDB, get_db
 from Data.eventlog_monitor import LogClearEvent, WindowsEventLogListener
+from config import DATA_DIR
 
 try:
     from watchdog.events import FileSystemEventHandler
@@ -69,7 +70,10 @@ class MonitorConfig:
             critical_paths=_resolve_list(raw.get("critical_paths", []), resolve),
             executable_extensions={str(x).lower() for x in raw.get("executable_extensions", [])},
             excluded_directory_names={str(x).strip().lower() for x in raw.get("excluded_directory_names", [])},
-            excluded_path_fragments=[os.path.normcase(str(x)).lower() for x in raw.get("excluded_path_fragments", [])],
+            excluded_path_fragments=[
+                _resolve_exclusion_fragment(str(fragment))
+                for fragment in raw.get("excluded_path_fragments", [])
+            ],
             burst_window_seconds=max(float(raw.get("burst_window_seconds", 2.0)), 0.05),
             burst_threshold=max(int(raw.get("burst_threshold", 25)), 2),
             max_batch_events=max(int(raw.get("max_batch_events", 2048)), 1),
@@ -98,6 +102,19 @@ def _resolve_list(values: list[str], resolver: Callable[[str], str]) -> list[str
     return [resolver(str(value)) for value in values if str(value).strip()]
 
 
+def _resolve_exclusion_fragment(fragment: str) -> str:
+    """Resolve default Aurora path markers while leaving user fragments intact."""
+    roots = {
+        "$AURORA_DATA_DIR": DATA_DIR,
+        "$AURORA_REPO_DIR": str(Path(__file__).resolve().parent.parent),
+    }
+    root = roots.get(fragment)
+    if root is None:
+        return os.path.normcase(fragment).lower()
+    normalized = os.path.normcase(os.path.abspath(root)).lower()
+    return normalized.rstrip("\\/") + os.sep
+
+
 def _within(path: str, root: str) -> bool:
     try:
         return os.path.commonpath((os.path.abspath(path), os.path.abspath(root))) == os.path.abspath(root)
@@ -111,16 +128,15 @@ def is_executable_path(path: str, config: MonitorConfig) -> bool:
 
 
 def is_excluded_path(path: str, config: MonitorConfig) -> bool:
-    """Apply configured cache/build/game exclusions, except temp executables."""
+    """Apply configured exclusions while retaining ordinary temp executables."""
     normalized = os.path.normcase(os.path.abspath(path)).lower()
-    in_temp = any(_within(path, root) for root in config.temp_roots)
-    if in_temp:
-        return not is_executable_path(path, config)
-
     if any(fragment and fragment in normalized for fragment in config.excluded_path_fragments):
         return True
     components = {part.strip().lower() for part in Path(normalized).parts}
-    return bool(components & config.excluded_directory_names)
+    if components & config.excluded_directory_names:
+        return True
+    in_temp = any(_within(path, root) for root in config.temp_roots)
+    return in_temp and not is_executable_path(path, config)
 
 
 def is_startup_path(path: str, config: MonitorConfig) -> bool:
@@ -184,6 +200,17 @@ class FileMonitor:
     def dropped_events(self) -> int:
         return self._dropped_events
 
+    @property
+    def watched_root_count(self) -> int:
+        """Number of configured watch roots (filesystem locations observed)."""
+        return len(self.config.all_roots)
+
+    @property
+    def event_log_active(self) -> bool:
+        """Whether Windows Event Log subscriptions are running (needs admin)."""
+        listener = self._event_log_listener
+        return listener is not None and bool(getattr(listener, "_threads", None))
+
     def enqueue(self, event: FileChange | LogClearEvent) -> bool:
         """Queue an event without blocking the OS callback thread."""
         try:
@@ -239,34 +266,41 @@ class FileMonitor:
             self._worker = None
 
     def _worker_loop(self) -> None:
-        while not self._stop.is_set() or not self._events.empty():
-            try:
-                first = self._events.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if isinstance(first, LogClearEvent):
-                self._process_log_clear(first)
-                continue
-
-            batch: list[FileChange] = [first]
-            deadline = time.monotonic() + self.config.burst_window_seconds
-            while len(batch) < self.config.max_batch_events:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
+        try:
+            while not self._stop.is_set() or not self._events.empty():
                 try:
-                    next_event = self._events.get(timeout=remaining)
+                    first = self._events.get(timeout=0.1)
                 except queue.Empty:
-                    break
-                if isinstance(next_event, LogClearEvent):
-                    self._process_batch(batch)
-                    batch = []
-                    self._process_log_clear(next_event)
-                    deadline = time.monotonic() + self.config.burst_window_seconds
                     continue
-                batch.append(next_event)
-            if batch:
-                self._process_batch(batch)
+                if isinstance(first, LogClearEvent):
+                    self._process_log_clear(first)
+                    continue
+
+                batch: list[FileChange] = [first]
+                deadline = time.monotonic() + self.config.burst_window_seconds
+                while len(batch) < self.config.max_batch_events:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        next_event = self._events.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if isinstance(next_event, LogClearEvent):
+                        self._process_batch(batch)
+                        batch = []
+                        self._process_log_clear(next_event)
+                        deadline = time.monotonic() + self.config.burst_window_seconds
+                        continue
+                    batch.append(next_event)
+                if batch:
+                    self._process_batch(batch)
+        finally:
+            try:
+                self.storage.flush()
+                self.storage.close()
+            except Exception:
+                LOGGER.exception("Could not flush Module B worker storage")
 
     def process_batch(self, events: list[FileChange]) -> None:
         """Public synchronous entry point for deterministic tests and replay."""

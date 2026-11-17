@@ -5,25 +5,46 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import logging.handlers
 import os
 import re
 import sqlite3
 import sys
 import threading
+import time
+from collections import deque
 from typing import Any, Optional
 
 from config import DB_PATH, MACHINE_ID, VALID_WORKLOAD_TAGS
 from Core.schema_v2 import SystemSnapshotV2
-from Data import collector_v2
 from Data.collector_v2 import run_collector, set_workload_tag
 from Data.file_monitor import FileMonitor
 from Data.storage import MetricsDB, get_db
+from aurora_ui import AuroraApp
 
 
 LOGGER = logging.getLogger("aurora")
-# The protected legacy collector's startup message reads DB_PATH as a module
-# global even though it is not imported there. Supply the configured path here.
-collector_v2.DB_PATH = DB_PATH
+
+
+class _LoggingStream:
+    """Turn redirected collector writes into records on the configured logger."""
+
+    def __init__(self, level: int):
+        self.level = level
+        self.pending = ""
+
+    def write(self, value: str) -> int:
+        self.pending += value
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            if line.strip():
+                LOGGER.log(self.level, "%s", line)
+        return len(value)
+
+    def flush(self) -> None:
+        if self.pending.strip():
+            LOGGER.log(self.level, "%s", self.pending)
+        self.pending = ""
 
 
 def _print_alert(alert, *, stream=None) -> None:
@@ -37,14 +58,27 @@ def _run_collector(
 ) -> None:
     try:
         if quiet:
-            with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink):
+            stdout = _LoggingStream(logging.INFO)
+            stderr = _LoggingStream(logging.WARNING)
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 run_collector(verbose=False, stop_event=stop_event)
+            stdout.flush()
+            stderr.flush()
         else:
             run_collector(verbose=True, stop_event=stop_event)
     except Exception:
         LOGGER.exception("Collector stopped after an error")
         failure_event.set()
         stop_event.set()
+    finally:
+        try:
+            storage = get_db()
+            storage.flush()
+            storage.close()
+        except Exception:
+            LOGGER.exception("Could not flush collector storage")
+            failure_event.set()
+            stop_event.set()
 
 
 def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
@@ -53,15 +87,40 @@ def _start_monitor(monitor: FileMonitor, stop_event: threading.Event) -> None:
             monitor.start()
     except Exception as exc:
         LOGGER.warning("Module B could not start; telemetry collection will continue: %s", exc)
+    finally:
+        storage = getattr(monitor, "storage", None)
+        if storage is not None:
+            try:
+                storage.flush()
+                storage.close()
+            except Exception:
+                LOGGER.exception("Could not flush Module B startup storage")
 
 
-def run(tag: str | None = None, quiet: bool = False) -> int:
-    """Run telemetry and Module B until interrupted."""
+def run(
+    tag: str | None = None,
+    quiet: bool = False,
+    *,
+    plain: bool = False,
+) -> int:
+    """Run telemetry and Module B until interrupted.
+
+    The Textual dashboard is the default; ``plain`` keeps the headless alert
+    stream available for scripts and background use.
+    """
     storage = get_db()
     if tag and not set_workload_tag(tag):
         LOGGER.error("Unsupported workload tag: %s", tag)
         return 2
 
+    if plain:
+        return _run_plain(storage, quiet=quiet)
+
+    return _run_dashboard(storage)
+
+
+def _run_plain(storage: MetricsDB, quiet: bool = False) -> int:
+    """Legacy headless mode: print one alert per line to the console."""
     console = sys.stdout
     seen_ids = {alert.id for alert in storage.get_alerts(limit=500)}
     stop_event = threading.Event()
@@ -99,6 +158,104 @@ def run(tag: str | None = None, quiet: bool = False) -> int:
             LOGGER.warning("Error while stopping Module B: %s", exc)
         monitor_thread.join(timeout=3.0)
         collector_thread.join(timeout=3.0)
+        storage.close()
+    return 1 if collector_failed.is_set() else 0
+
+
+# ── Dashboard logging ───────────────────────────────────────────────────
+
+class _LogCaptureHandler(logging.Handler):
+    """Captures recent log records so WARNING+ lines can be shown in the UI."""
+
+    def __init__(self, capacity: int = 80):
+        super().__init__(level=logging.WARNING)
+        self.records: deque[logging.LogRecord] = deque(maxlen=capacity)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+_LOG_CAPTURE: Optional[_LogCaptureHandler] = None
+
+
+def _setup_dashboard_logging() -> None:
+    """Route logging to a rotating file in the data dir (never the console).
+
+    Configures the root logger so every module (aurora, collector, Module B,
+    event log) writes to the file; the capture handler keeps recent WARNING+
+    lines for the dashboard strip.
+    """
+    global _LOG_CAPTURE
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+
+    log_path = os.path.join(os.path.dirname(DB_PATH), "aurora.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root.addHandler(file_handler)
+
+    capture = _LogCaptureHandler()
+    root.addHandler(capture)
+    _LOG_CAPTURE = capture
+    logging.getLogger("aurora").setLevel(logging.INFO)
+
+
+def _recent_warnings() -> list[str]:
+    """Return the most recent captured WARNING+ log lines."""
+    if _LOG_CAPTURE is None:
+        return []
+    lines = []
+    for record in list(_LOG_CAPTURE.records)[-6:]:
+        lines.append(f"{record.levelname[0]} {record.getMessage()[:60]}")
+    return lines
+
+
+# ── Dashboard ───────────────────────────────────────────────────────────
+
+def _run_dashboard(storage) -> int:
+    """Run the Textual UI with background collection and monitoring."""
+    stop_event = threading.Event()
+    collector_failed = threading.Event()
+    monitor = FileMonitor(storage=storage)
+    collector_thread = threading.Thread(
+        target=_run_collector,
+        args=(stop_event, True, collector_failed),
+        name="aurora-collector",
+        daemon=True,
+    )
+    monitor_thread = threading.Thread(
+        target=_start_monitor,
+        args=(monitor, stop_event),
+        name="aurora-monitor-bootstrap",
+        daemon=True,
+    )
+    collector_thread.start()
+    monitor_thread.start()
+    try:
+        AuroraApp(
+            storage,
+            machine_id=MACHINE_ID,
+            monitor=monitor,
+            warning_provider=_recent_warnings,
+            collector_failed=collector_failed,
+        ).run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        try:
+            monitor.stop()
+        except Exception as exc:
+            LOGGER.warning("Error while stopping Module B: %s", exc)
+        monitor_thread.join(timeout=3.0)
+        collector_thread.join(timeout=3.0)
+        storage.flush()
         storage.close()
     return 1 if collector_failed.is_set() else 0
 
@@ -279,7 +436,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser = subparsers.add_parser("run", help="collect telemetry and monitor files (default)")
     run_parser.add_argument("--tag", choices=sorted(VALID_WORKLOAD_TAGS), help="workload tag")
     run_parser.add_argument("--quiet", action="store_true", help="suppress collector sample output")
-
+    run_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="headless mode: print one alert per line (no dashboard)",
+    )
     alerts_parser = subparsers.add_parser("alerts", help="print recent alerts from SQLite")
     alerts_parser.add_argument("--limit", type=int, default=20, help="number of recent alerts")
     status_parser = subparsers.add_parser("status", help="print latest snapshot and database counts")
@@ -288,9 +449,21 @@ def main(argv: list[str] | None = None) -> int:
     if not command_args or command_args[0].startswith("-"):
         command_args.insert(0, "run")
     args = parser.parse_args(command_args)
+    if args.command in (None, "run") and not args.plain:
+        # Dashboard mode: logging goes to a rotating file, never the console.
+        _setup_dashboard_logging()
+        return run(
+            tag=getattr(args, "tag", None),
+            quiet=True,
+            plain=False,
+        )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.command in (None, "run"):
-        return run(tag=getattr(args, "tag", None), quiet=getattr(args, "quiet", False))
+        return run(
+            tag=getattr(args, "tag", None),
+            quiet=getattr(args, "quiet", False),
+            plain=getattr(args, "plain", False),
+        )
     if args.command == "alerts":
         if args.limit < 0:
             parser.error("--limit must be non-negative")

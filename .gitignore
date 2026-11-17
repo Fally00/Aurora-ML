@@ -40,5 +40,12 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Runtime state / coverage
+.coverage
+Data/workload_tag.txt
+
+# Misplaced config
+github/.gitattributes
+
 # Logs
 *.log

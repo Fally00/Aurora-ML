@@ -1,6 +1,6 @@
 # Aurora
 
-Aurora is a CLI-only passive watcher and system telemetry tool in the SIT-Py repository. It records system measurements and file/Event Log observations in SQLite and prints new alerts to the console. It does not execute, modify, quarantine, or delete watched files, and it does not automatically remediate anything.
+Aurora is a passive system telemetry and file/Event Log watcher in the SIT-Py repository. Its Textual terminal app displays live system measurements and alerts; telemetry and observations are stored in SQLite. It does not execute, modify, quarantine, or delete watched files, and it does not automatically remediate anything.
 
 The repository also contains the earlier SIT-Py machine-learning prototype. Its `main.py` and retraining entry points are separate from Aurora's CLI.
 
@@ -11,8 +11,8 @@ The repository also contains the earlier SIT-Py machine-learning prototype. Its 
 | 1. Repository and ML pipeline cleanup | Implemented; the legacy ML tests are in `tests/`. |
 | 2. Collector v2 and SQLite telemetry | Implemented with mocked tests. Real 10-minute sensor acceptance on target hardware is pending. |
 | 3. Module B file and Event Log monitor | Implemented with rule, storage, and mocked Event Log tests. |
-| 4. CLI and packaging | CLI commands and one-file PyInstaller build are implemented. The Windows executable built and launched from a console on 2026-11-16. |
-| 5. Tests and evaluation tools | Latest run: 118 passed, 1 failed out of 119. The remaining failure is the NVML-unavailable test on a host where NVML successfully returns real GPU readings. Scenario results and live overhead measurements are still pending. |
+| 4. CLI and packaging | Textual dashboard, plain CLI mode, and one-file PyInstaller build. |
+| 5. Tests and evaluation tools | Automated tests cover the Textual pilot, CLI lifecycle, collector, monitor, storage, and evaluation scripts. Live sensor acceptance and overhead measurements are still pending. |
 
 The Aurora workload classifier and resource-abuse detector are interfaces only; no ML detector is enabled in Aurora.
 
@@ -20,7 +20,7 @@ The Aurora workload classifier and resource-abuse detector are interfaces only; 
 
 - Windows 10 or 11, 64-bit, for filesystem notifications and the packaged executable.
 - Python 3.12 64-bit is recommended for this repository's pinned NumPy and scikit-learn versions. Their Windows wheels include CPython 3.12 builds: [NumPy 1.26.4](https://pypi.org/project/numpy/1.26.4/) and [scikit-learn 1.5.1](https://pypi.org/project/scikit-learn/1.5.1/).
-- Install the pinned packages from `requirements.txt`. This includes watchdog, psutil, PyInstaller, and the legacy ML packages.
+- Install the packages from `requirements.txt`. This includes watchdog, psutil, PyInstaller, Rich, Textual, and the legacy ML packages.
 - NVIDIA GPU measurements require an installed NVIDIA driver. Run `python -m Data.verify_nvml` to inspect NVML access. CPU package temperature and clocks are optional and require LibreHardwareMonitor running with its WMI interface enabled.
 - Administrator rights are only needed for Windows Event Log clear subscriptions (Security event 1102 and System event 104). File watching and telemetry continue without elevation; one warning is logged when Event Log access is unavailable.
 
@@ -38,46 +38,90 @@ If the Python launcher command differs on your machine, create the virtual envir
 
 ## Run Aurora
 
-Start telemetry collection and Module B monitoring with:
+Start telemetry collection, Module B monitoring, and the live Textual
+terminal dashboard with:
 
 ```powershell
 .\.venv\Scripts\python.exe aurora_cli.py
 ```
 
-The default `run` command polls telemetry once per second and watches configured files and Event Logs until Ctrl+C. The collector and Module B watcher run independently; Module B startup failure does not stop telemetry. Newly stored alerts are printed one per line with severity, time, and title.
+The default `run` command shows a live dashboard with CPU, GPU, memory, disk,
+network, top processes, an alerts table, and a console command pane. Widgets
+refresh once per second from SQLite.
+The collector and Module B watcher run in the background; Module B startup
+failure does not stop telemetry.
 
 Available commands:
 
 ```powershell
+.\.venv\Scripts\python.exe aurora_cli.py            # dashboard (default)
 .\.venv\Scripts\python.exe aurora_cli.py run --tag gaming
-.\.venv\Scripts\python.exe aurora_cli.py run --quiet
+.\.venv\Scripts\python.exe aurora_cli.py run --plain # headless, one alert per line
 .\.venv\Scripts\python.exe aurora_cli.py alerts --limit 20
 .\.venv\Scripts\python.exe aurora_cli.py status
 ```
 
-Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`. `--tag` selects and saves a workload tag in the runtime data directory. `--quiet` suppresses collector output. `alerts` prints recent records from SQLite as severity, timestamp, and title; `status` prints a labeled system report and database counts, with `N/A` for unavailable sensors. The CLI path does not load the legacy machine-learning models.
+Dashboard keys and commands:
 
-For standalone collection or monitoring, run `python -m Data.collector_v2` or `python -m Data.file_monitor`. Do not run these alongside the CLI `run` command unless duplicate collection or watcher instances are intended.
+| Key | Action |
+|-----|--------|
+| q | Quit and shut down cleanly |
+| Tab | Cycle focus between panels |
+| ↑ / ↓ | Move/scroll the focused table |
+| n | Mark the selected alert normal |
+| d | Dismiss the selected alert |
+| p | Pause or resume dashboard refresh |
+| : or / | Focus the command bar |
+| Esc | Leave the command bar |
 
-To change the tag during a source checkout run, write one supported value to `Data/workload_tag.txt`. In the packaged app, the runtime data directory is `%LOCALAPPDATA%\Aurora\Data`.
+Commands are entered after `:` or `/`:
+`status`, `alerts [n]`, `tag <idle|gaming|compile|browsing|stress>`,
+`filter <info|warn|crit|all>`, `normal [id]`, `dismiss [id]`, `pause`,
+`resume`, `clear`, `help`, and `quit`. Output appears in the dashboard
+console pane.
+
+Dashboard logging:
+
+In dashboard mode, collector output and logs are **not** written to the
+console. They are routed to a rotating log file at `Data/db/aurora.log`
+(source checkout) or `%LOCALAPPDATA%\Aurora\Data\aurora.log` (packaged app);
+the latest WARNING+ messages appear in a strip.
+
+Supported tags are `idle`, `gaming`, `compile`, `browsing`, and `stress`.
+`--tag` selects and saves a workload tag in the runtime data directory.
+`--plain` selects the headless alert stream; add `--quiet` to suppress
+collector sample output. `alerts` prints
+recent records from SQLite as severity, timestamp, and title; `status`
+prints a labeled system report and database counts, with `N/A` for
+unavailable sensors. The CLI path does not load the legacy machine-learning
+models.
+
+For standalone collection or monitoring, run `python -m Data.collector_v2`
+or `python -m Data.file_monitor`. Do not run these alongside the CLI `run`
+command unless duplicate collection or watcher instances are intended.
+
+To change the tag during a source checkout run, write one supported value to
+`Data/workload_tag.txt`. In the packaged app, the runtime data directory is
+`%LOCALAPPDATA%\Aurora\Data`.
 
 ## File monitoring and alerts
 
 The watcher uses OS filesystem change notifications through watchdog; it does not poll directory contents. Default roots cover Desktop, Documents, Downloads, Music, Pictures, Videos, OneDrive, startup folders, and the temporary folder. The JSON config is [Data/watcher_config.json](Data/watcher_config.json).
 
-By default, cache folders, temporary non-executables, build outputs, `.git` internals, and common game-library folders are excluded. Executables in temporary folders are still observed. Executables and configured critical files are SHA-256 hashed. File edits, executable changes, and startup-path changes are warnings; high-volume ordinary file creation is grouped into an informational event. Event Log clear detections are critical. Event Log subscriptions watch future clear events only; they do not scan historical events.
+By default, cache folders, temporary non-executables, build outputs, `.git` internals, the Aurora checkout and data directory, `.venv`, `site-packages`, `__pycache__`, `Aurora.exe`, and common game-library folders are excluded. Other executables in temporary folders are still observed. Executables and configured critical files are SHA-256 hashed. File edits, executable changes, and startup-path changes are warnings; high-volume ordinary file creation is grouped into an informational event. Event Log clear detections are critical. Event Log subscriptions watch future clear events only; they do not scan historical events.
 
-The shared SQLite `alerts` table stores alert ID, timestamp, module, severity, title, signals JSON, grouped count, dismissed state, and marked-normal feedback. Alerts are retained in SQLite and new records are printed by `run`. The packaged app embeds the default watcher config; edit `Data/watcher_config.json` before rebuilding to customize packaged defaults.
+The shared SQLite `alerts` table stores alert ID, timestamp, module, severity, title, signals JSON, grouped count, dismissed state, and marked-normal feedback. Alerts are retained in SQLite and appear in the live dashboard or are printed by `run --plain`. The packaged app embeds the default watcher config; edit `Data/watcher_config.json` before rebuilding to customize packaged defaults.
 
 ## Build the Windows executable
 
-Build on Windows from the repository root with the virtual environment active or its executable on PATH:
+Build on Windows from the repository root. The build script uses `.venv` when
+present and otherwise uses the first `python` on `PATH`:
 
 ```powershell
 .\build_aurora.ps1
 ```
 
-The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec). Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. The executable was built and its `status` command was verified from a console. Run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
+The one-file console executable is written to `dist\Aurora.exe`. The PyInstaller recipe is [Aurora.spec](Aurora.spec); it collects Textual's hidden imports and keeps `sklearn` excluded. Build and runtime data are ignored by Git. The packaged database and workload tag are stored under `%LOCALAPPDATA%\Aurora\Data`, outside PyInstaller's temporary extraction directory. Run elevated only if you need Security/System Event Log clear subscriptions. It does not request elevation or change system settings.
 
 ## Tests and evaluation
 
@@ -87,7 +131,7 @@ Run the unit suite:
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-The tests cover the CLI lifecycle, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and the evaluation scripts. On 2026-11-16, 118 of 119 tests passed; the NVML-unavailable test failed because NVML was available on the test machine and returned GPU readings.
+The tests cover the CLI lifecycle, command parsing, Textual `App.run_test()` refresh and key behavior, output routing, exclusions, severity mapping, burst grouping, cooldowns, alert storage/schema, feedback, file hashing, Event Log subscription behavior with mocked Windows APIs, and evaluation scripts.
 
 The scenario runner writes to an isolated temporary watched tree and a fresh SQLite database under `Data/scenario_runs/<run-id>`. It edits a text file, creates a harmless `.exe` data stub that is never executed, copies 100 text files into a test Downloads folder, and simulates Security event 1102 through Module B's queue. It never clears a real Windows Event Log. The default run includes this simulated log-clear case, so explicitly enable it only on a test VM:
 
@@ -141,7 +185,8 @@ Core/         Schemas, alerts, legacy models, and Aurora model interfaces
 Data/         Collector v2, SQLite storage, Module B, watcher configuration
 scripts/      Scenario runner, alert metrics, and overhead sampler
 tests/        Unit tests (including mocked Windows API tests)
-aurora_cli.py CLI entry point for run, alerts, and status
+aurora_cli.py CLI entry point for run, alerts, status, and the dashboard
+aurora_ui.py  Textual dashboard and pure presentation/command functions
 Aurora.spec   PyInstaller one-file console build definition
 build_aurora.ps1 Windows build script
 ```

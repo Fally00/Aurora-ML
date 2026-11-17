@@ -1,12 +1,16 @@
 # Build on Windows with: pyinstaller --clean --noconfirm Aurora.spec
+from PyInstaller.utils.hooks import collect_submodules
+
 hiddenimports = [
     "pynvml",
     "wmi",
+    "rich",
+    "textual",
     "win32timezone",
     "win32evtlog",
     "win32event",
     "win32evtlogutil",
-]
+] + collect_submodules("textual")
 
 a = Analysis(
     ["aurora_cli.py"],
@@ -17,7 +21,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "scipy", "sklearn", "streamlit", "plotly"],
+    excludes=["tkinter", "matplotlib", "scipy", "sklearn"],
     noarchive=False,
     optimize=1,
 )
